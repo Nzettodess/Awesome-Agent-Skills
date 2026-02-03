@@ -13,6 +13,7 @@ Enhance agent reasoning, evaluation, and context management.
 - **llm-evaluation**: Frameworks for evaluating Large Language Models.
 - **prompt-engineering**: Best practices and templates for effective prompting.
 - **thought-based-reasoning**: Modules to improve chain-of-thought capabilities.
+- **AI-research-SKILLs**: Comprehensive AI research and analysis tools.
 
 ### 📊 Charts
 
@@ -31,6 +32,12 @@ Perform complex data analysis and engineering tasks.
 - **senior-data-scientist**: Statistical modeling and machine learning capabilities.
 - **xlsx**: Low-level Excel file manipulation.
 
+### 💻 Development
+
+Tools for software development and code quality.
+
+- **code-review**: Automated code review and assistance tools.
+
 ### 🎨 Frontend
 
 Design and prototype user interfaces.
@@ -48,7 +55,8 @@ Generate high-quality documents and presentations.
 
 ### 🛠️ Skill Creator
 
-- **skill-creator**: Meta-tools for building and documenting new agent skills.
+- **Claude Skill Creator**: Tools for building skills specifically for Claude.
+- **One4All Skill Creator**: General-purpose skill creation and management.
 
 ## 🚀 Usage
 
