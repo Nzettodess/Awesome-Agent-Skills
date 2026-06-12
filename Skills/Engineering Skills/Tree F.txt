@@ -1,0 +1,82 @@
+C:.
+│   README.md
+│   Tree F.txt
+│
+└───skills
+    ├───engineering
+    │   │   README.md
+    │   │
+    │   ├───diagnose
+    │   │   │   SKILL.md
+    │   │   │
+    │   │   └───scripts
+    │   │           hitl-loop.template.sh
+    │   │
+    │   ├───grill-with-docs
+    │   │       ADR-FORMAT.md
+    │   │       CONTEXT-FORMAT.md
+    │   │       SKILL.md
+    │   │
+    │   ├───improve-codebase-architecture
+    │   │       DEEPENING.md
+    │   │       HTML-REPORT.md
+    │   │       INTERFACE-DESIGN.md
+    │   │       LANGUAGE.md
+    │   │       SKILL.md
+    │   │
+    │   ├───prototype
+    │   │       LOGIC.md
+    │   │       SKILL.md
+    │   │       UI.md
+    │   │
+    │   ├───setup-matt-pocock-skills
+    │   │       domain.md
+    │   │       issue-tracker-github.md
+    │   │       issue-tracker-gitlab.md
+    │   │       issue-tracker-local.md
+    │   │       SKILL.md
+    │   │       triage-labels.md
+    │   │
+    │   ├───tdd
+    │   │       deep-modules.md
+    │   │       interface-design.md
+    │   │       mocking.md
+    │   │       refactoring.md
+    │   │       SKILL.md
+    │   │       tests.md
+    │   │
+    │   ├───to-issues
+    │   │       SKILL.md
+    │   │
+    │   ├───to-prd
+    │   │       SKILL.md
+    │   │
+    │   ├───triage
+    │   │       AGENT-BRIEF.md
+    │   │       OUT-OF-SCOPE.md
+    │   │       SKILL.md
+    │   │
+    │   └───zoom-out
+    │           SKILL.md
+    │
+    ├───neat-freak
+    │   │   SKILL.md
+    │   │
+    │   └───references
+    │           agent-paths.md
+    │           sync-matrix.md
+    │
+    └───productivity
+        │   README.md
+        │
+        ├───caveman
+        │       SKILL.md
+        │
+        ├───grill-me
+        │       SKILL.md
+        │
+        ├───handoff
+        │       SKILL.md
+        │
+        └───write-a-skill
+                SKILL.md
