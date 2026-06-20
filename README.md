@@ -55,6 +55,7 @@ Tools for software development and code quality.
 Skills for real engineering - driving alignment, fixing bugs, and improving architecture.
 
 - **diagnose**: Disciplined diagnosis loop for hard bugs and performance regressions.
+- **ax-extract-workflow**: Reconstruct the skill sequence behind a shipped artifact.
 - **grill-with-docs**: Grilling session that challenges plans and updates context docs.
 - **improve-codebase-architecture**: Find architectural deepening opportunities in a codebase.
 - **prototype**: Build throwaway prototypes to flesh out designs.
