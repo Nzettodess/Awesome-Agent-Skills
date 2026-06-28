@@ -45,6 +45,7 @@ Perform complex data analysis and engineering tasks.
 - **senior-data-engineer**: Advanced data pipeline and engineering workflows.
 - **senior-data-scientist**: Statistical modeling and machine learning capabilities.
 - **xlsx**: Low-level Excel file manipulation.
+- **[x-twitter-scraper](https://github.com/Xquik-dev/x-twitter-scraper/tree/master/skills/x-twitter-scraper)**: Search X posts, export followers, and monitor events.
 
 ### 💻 Development
 Tools for software development and code quality.
