@@ -1,0 +1,48 @@
+// ==UserScript==
+// @name         Bilibili to Blanc Redirector (Final)
+// @namespace    http://tampermonkey.net/
+// @version      2026-03-16
+// @description  Instantly redirects standard Bilibili live rooms to the clean /blanc/ layout.
+// @author       You
+// @match        *://*.bilibili.com/*
+// @grant        window.onurlchange
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // The core redirect logic we proved in your console
+    function checkAndRedirect() {
+        // Only trigger on the live domain
+        if (window.location.hostname !== 'live.bilibili.com') return;
+
+        let currentPath = window.location.pathname;
+
+        // Prevent infinite loops if you are already in the blanc layout
+        if (currentPath.includes('/blanc/')) return;
+
+        // Extract the room number from the path (e.g., /732)
+        let roomMatch = currentPath.match(/^\/(\d+)/);
+
+        if (roomMatch) {
+            let roomId = roomMatch[1];
+            // Keep your extra tags like ?live_from=76001
+            let currentQuery = window.location.search;
+            let targetUrl = "https://live.bilibili.com/blanc/" + roomId + currentQuery;
+
+            // Instantly swap to the new URL
+            window.location.replace(targetUrl);
+        }
+    }
+
+    // Trigger 1: Run immediately when opening a new tab or hard refreshing
+    checkAndRedirect();
+
+    // Trigger 2: Listen for Bilibili changing the URL in the background (SPA navigation)
+    if (window.onurlchange === null) {
+        window.addEventListener('urlchange', function(info) {
+            checkAndRedirect();
+        });
+    }
+})();

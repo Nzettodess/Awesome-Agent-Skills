@@ -1,0 +1,100 @@
+// ==UserScript==
+// @name         DuonaoVOD / MacCMS Web Audio Fixer (M3U8 Discontinuity Stripper)
+// @namespace    https://antigravity.ai/
+// @version      5.0
+// @description  在浏览器底层拦截并净化 M3U8 播放列表，实时移除导致音画降调/杂音的 #EXT-X-DISCONTINUITY 断点标记，实现网页端 100% 纯净原声播放！
+// @author       Antigravity
+// @match        *://duonaovod.org/*
+// @match        *://*.duonaovod.org/*
+// @match        *://*/*/vod/play/*
+// @match        *://*/dn/player/*
+// @run-at       document-start
+// @grant        unsafeWindow
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
+    // 1. 拦截 XMLHttpRequest (HLS.js / yzmplayer 常用的 M3U8 请求通道)
+    const XHR = win.XMLHttpRequest;
+    const originalOpen = XHR.prototype.open;
+
+    XHR.prototype.open = function (method, url) {
+        this._url = url;
+        return originalOpen.apply(this, arguments);
+    };
+
+    const origResponseText = Object.getOwnPropertyDescriptor(XHR.prototype, 'responseText');
+    const origResponse = Object.getOwnPropertyDescriptor(XHR.prototype, 'response');
+
+    if (origResponseText && origResponseText.get) {
+        Object.defineProperty(XHR.prototype, 'responseText', {
+            get: function () {
+                const text = origResponseText.get.call(this);
+                if (typeof text === 'string' && text.includes('#EXT-X-DISCONTINUITY')) {
+                    console.log('[M3U8Sanitizer] Stripped #EXT-X-DISCONTINUITY from XHR M3U8');
+                    return text.replace(/#EXT-X-DISCONTINUITY\r?\n?/g, '');
+                }
+                return text;
+            },
+            configurable: true
+        });
+    }
+
+    if (origResponse && origResponse.get) {
+        Object.defineProperty(XHR.prototype, 'response', {
+            get: function () {
+                const res = origResponse.get.call(this);
+                if (typeof res === 'string' && res.includes('#EXT-X-DISCONTINUITY')) {
+                    console.log('[M3U8Sanitizer] Stripped #EXT-X-DISCONTINUITY from XHR response');
+                    return res.replace(/#EXT-X-DISCONTINUITY\r?\n?/g, '');
+                }
+                return res;
+            },
+            configurable: true
+        });
+    }
+
+    // 2. 拦截 Fetch API
+    if (win.fetch) {
+        const originalFetch = win.fetch;
+        win.fetch = async function (...args) {
+            const response = await originalFetch.apply(this, args);
+            const url = args[0] ? (typeof args[0] === 'string' ? args[0] : args[0].url) : '';
+
+            if (url && (url.includes('.m3u8') || url.includes('/hls/'))) {
+                try {
+                    const clone = response.clone();
+                    const text = await clone.text();
+                    if (text.includes('#EXT-X-DISCONTINUITY')) {
+                        console.log('[M3U8Sanitizer] Stripped #EXT-X-DISCONTINUITY from Fetch M3U8');
+                        const cleanText = text.replace(/#EXT-X-DISCONTINUITY\r?\n?/g, '');
+                        return new Response(cleanText, {
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: response.headers
+                        });
+                    }
+                } catch (e) {
+                    console.warn('[M3U8Sanitizer] Fetch intercept error:', e);
+                }
+            }
+            return response;
+        };
+    }
+
+    // 3. 拦截广告与恶意弹窗
+    const originalWinOpen = win.open;
+    win.open = function (url) {
+        if (typeof url === 'string') {
+            const blocked = ['topdisplayformat', 'breedsmuteexams', 'nn125.com', 'wps.com', 'effectivedisplayformats'];
+            if (blocked.some(d => url.includes(d))) {
+                return null;
+            }
+        }
+        return originalWinOpen.apply(this, arguments);
+    };
+
+})();
