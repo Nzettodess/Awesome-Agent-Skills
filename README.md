@@ -49,6 +49,7 @@ Perform complex data analysis and engineering tasks.
 ### 💻 Development
 Tools for software development and code quality.
 
+- **browser-telemetry-sniffing**: Practical workflows, probing methodology, and troubleshooting decision tree for reverse-engineering undocumented SPA HTTP endpoints and implementing resilient resumable uploads.
 - **code-review**: Automated code review and assistance tools.
 
 ### ⚙️ Engineering (Matt Pocock Skills)
