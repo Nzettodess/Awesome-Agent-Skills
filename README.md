@@ -10,6 +10,7 @@ A curated collection of specialized skills designed to extend the capabilities o
   - [💻 Development](#-development)
   - [⚙️ Engineering (Matt Pocock Skills)](#️-engineering-matt-pocock-skills)
   - [🎨 Frontend](#-frontend)
+  - [🎬 Video Production](#-video-production)
   - [⚡ Productivity](#-productivity)
   - [📑 Reports](#-reports)
   - [🛠️ Skill Creator](#️-skill-creator)
@@ -71,6 +72,11 @@ Design and prototype user interfaces.
 - **canvas-design**: HTML5 Canvas drawing and manipulation.
 - **frontend-ui-ux**: UI/UX design patterns and component generation.
 - **ui-ux-pro-max**: Design Intelligence - Searchable database of UI styles, color palettes, and UX guidelines.
+
+### 🎬 Video Production
+Plan, compose, edit, and assemble video projects with coding agents.
+
+- **[OrkasVideoStudio Video Router](https://github.com/Orkas-AI/Orkas-VideoStudio/tree/main/packages/skills/video-router)**: Route video requests through planning, editing, generation, assembly, and validation workflows.
 
 ### ⚡ Productivity
 General workflow tools for efficient agent interaction.
