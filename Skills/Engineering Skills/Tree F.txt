@@ -6,6 +6,9 @@ C:.
     ├───engineering
     │   │   README.md
     │   │
+    │   ├───ax-extract-workflow
+    │   │       SKILL.md
+    │   │
     │   ├───diagnose
     │   │   │   SKILL.md
     │   │   │
