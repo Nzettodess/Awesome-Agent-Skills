@@ -139,7 +139,7 @@ A curated collection of specialized skills designed to extend the capabilities o
 | `Engineering/Agentic AI Development/context-window-management` | Subfolder (`cli-tool/components/skills/ai-research/context-window-management`) | https://github.com/davila7/claude-code-templates |
 | `Engineering/Agentic AI Development/openrig-context-engineering` | Subfolder (`packages/daemon/specs/agents/shared/skills/process/context-engineering`) | https://github.com/mvschwarz/openrig |
 
-> **Syncing:** Run `.\sync-skills.ps1 -DryRun` to preview updates or `.\sync-skills.ps1` to sync all entries in [`sources.json`](sources.json). A weekly GitHub Actions workflow is also configured in [`.github/workflows/sync-skills.yml`](.github/workflows/sync-skills.yml).
+> **Syncing:** Run `.\sync-skills.ps1 -DryRun` to preview updates or `.\sync-skills.ps1` to sync all entries in [`sources.json`](sources.json). A monthly GitHub Actions workflow is also configured in [`.github/workflows/sync-skills.yml`](.github/workflows/sync-skills.yml).
 
 ### ⚠️ Needs Source Mapping or Custom / Non-Syncable
 - **Likely upstreamable once repo URL is confirmed:** `Engineering/Agentic AI Development/AI-research-SKILLs-1.1.0` (`@orchestra-research/ai-research-skills`), `Data Analytic/Data Modeling/*`, `Data Analytic/Data Cleaning/*`, `Data Analytic/excel-analysis`, `Data Analytic/Business Analyst/strategy-advisor`.
