@@ -1,0 +1,41 @@
+name: Sync Upstream Skills
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Every Monday at 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: 'Optional skill name or path filter'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run skill sync
+        shell: pwsh
+        run: |
+          if ("${{ inputs.filter }}" -ne "") {
+            ./sync-skills.ps1 -Filter "${{ inputs.filter }}"
+          } else {
+            ./sync-skills.ps1
+          }
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: 'chore: sync upstream skills'
+          title: 'chore: sync upstream skills'
+          body: 'Automated sync of upstream skill repositories defined in `sources.json`.'
+          branch: chore/sync-upstream-skills
+          delete-branch: true
+

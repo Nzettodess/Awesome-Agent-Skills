@@ -1,0 +1,332 @@
+[
+  {
+    "name": "skill-creator",
+    "local": "Skills/Claude Skill Creator",
+    "repo": "https://github.com/anthropics/skills.git",
+    "branch": "main",
+    "path": "skills/skill-creator"
+  },
+  {
+    "name": "xlsx",
+    "local": "Skills/Data Analytic/xlsx/xlsx",
+    "repo": "https://github.com/anthropics/skills.git",
+    "branch": "main",
+    "path": "skills/xlsx"
+  },
+  {
+    "name": "canvas-design",
+    "local": "Skills/Frontend/canvas-design",
+    "repo": "https://github.com/anthropics/skills.git",
+    "branch": "main",
+    "path": "skills/canvas-design"
+  },
+  {
+    "name": "ui-ux-pro-max",
+    "local": "Skills/Frontend/ui-ux-pro-max",
+    "repo": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill.git",
+    "branch": "main",
+    "path": "src/ui-ux-pro-max"
+  },
+  {
+    "name": "stop-slop",
+    "local": "Skills/Writing/stop-slop",
+    "repo": "https://github.com/hardikpandya/stop-slop.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "mermaidjs-v11",
+    "local": "Skills/Charts/mermaidjs-v11",
+    "repo": "https://github.com/mrgoonie/claudekit-skills.git",
+    "branch": "main",
+    "path": ".claude/skills/mermaidjs-v11"
+  },
+  {
+    "name": "plotly",
+    "local": "Skills/Charts/plotly",
+    "repo": "https://github.com/davila7/claude-code-templates.git",
+    "branch": "main",
+    "path": "cli-tool/components/skills/scientific/plotly"
+  },
+  {
+    "name": "seaborn",
+    "local": "Skills/Charts/seaborn/seaborn",
+    "repo": "https://github.com/K-Dense-AI/scientific-agent-skills.git",
+    "branch": "main",
+    "path": "skills/seaborn"
+  },
+  {
+    "name": "professional-communication",
+    "local": "Skills/Writing/professional-communication",
+    "repo": "https://github.com/davila7/claude-code-templates.git",
+    "branch": "main",
+    "path": "cli-tool/components/skills/enterprise-communication/professional-communication"
+  },
+  {
+    "name": "professional-proofreader",
+    "local": "Skills/Writing/professional-proofreader",
+    "repo": "https://github.com/diegosouzapw/awesome-omni-skills.git",
+    "branch": "main",
+    "path": "skills/professional-proofreader"
+  },
+  {
+    "name": "power-bi-dax-optimization",
+    "local": "Skills/Data Analytic/Power BI/power-bi-dax-optimization/power-bi-dax-optimization",
+    "repo": "https://github.com/github/awesome-copilot.git",
+    "branch": "main",
+    "path": "skills/power-bi-dax-optimization"
+  },
+  {
+    "name": "power-bi-model-design-review",
+    "local": "Skills/Data Analytic/Power BI/power-bi-model-design-review/power-bi-model-design-review",
+    "repo": "https://github.com/github/awesome-copilot.git",
+    "branch": "main",
+    "path": "skills/power-bi-model-design-review"
+  },
+  {
+    "name": "power-bi-performance-troubleshooting",
+    "local": "Skills/Data Analytic/Power BI/power-bi-performance-troubleshooting/power-bi-performance-troubleshooting",
+    "repo": "https://github.com/github/awesome-copilot.git",
+    "branch": "main",
+    "path": "skills/power-bi-performance-troubleshooting"
+  },
+  {
+    "name": "power-bi-report-design-consultation",
+    "local": "Skills/Data Analytic/Power BI/power-bi-report-design-consultation/power-bi-report-design-consultation",
+    "repo": "https://github.com/github/awesome-copilot.git",
+    "branch": "main",
+    "path": "skills/power-bi-report-design-consultation"
+  },
+  {
+    "name": "powerbi-modeling",
+    "local": "Skills/Data Analytic/Power BI/powerbi-modeling/powerbi-modeling",
+    "repo": "https://github.com/github/awesome-copilot.git",
+    "branch": "main",
+    "path": "skills/powerbi-modeling"
+  },
+  {
+    "name": "matt-skills",
+    "local": "Skills/Engineering/matt-skills-main/skills-main",
+    "repo": "https://github.com/mattpocock/skills.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "pstack",
+    "local": "Skills/Engineering/pstack-main/pstack-main",
+    "repo": "https://github.com/backnotprop/pstack.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "reverse-api-engineer",
+    "local": "Skills/Engineering/reverse-api-engineer-main/reverse-api-engineer-main",
+    "repo": "https://github.com/kalil0321/reverse-api-engineer.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "code-review",
+    "local": "Skills/Engineering/Development/code-review",
+    "repo": "https://github.com/NeoLabHQ/context-engineering-kit.git",
+    "branch": "master",
+    "path": "."
+  },
+  {
+    "name": "ponytail",
+    "local": "Skills/Engineering/Development/ponytail",
+    "repo": "https://github.com/DietrichGebert/ponytail.git",
+    "branch": "main",
+    "path": "skills/ponytail"
+  },
+  {
+    "name": "ponytail-audit",
+    "local": "Skills/Engineering/Development/ponytail-audit",
+    "repo": "https://github.com/DietrichGebert/ponytail.git",
+    "branch": "main",
+    "path": "skills/ponytail-audit"
+  },
+  {
+    "name": "ponytail-debt",
+    "local": "Skills/Engineering/Development/ponytail-debt",
+    "repo": "https://github.com/DietrichGebert/ponytail.git",
+    "branch": "main",
+    "path": "skills/ponytail-debt"
+  },
+  {
+    "name": "ponytail-gain",
+    "local": "Skills/Engineering/Development/ponytail-gain",
+    "repo": "https://github.com/DietrichGebert/ponytail.git",
+    "branch": "main",
+    "path": "skills/ponytail-gain"
+  },
+  {
+    "name": "ponytail-help",
+    "local": "Skills/Engineering/Development/ponytail-help",
+    "repo": "https://github.com/DietrichGebert/ponytail.git",
+    "branch": "main",
+    "path": "skills/ponytail-help"
+  },
+  {
+    "name": "ponytail-review",
+    "local": "Skills/Engineering/Development/ponytail-review",
+    "repo": "https://github.com/DietrichGebert/ponytail.git",
+    "branch": "main",
+    "path": "skills/ponytail-review"
+  },
+  {
+    "name": "emil-skills",
+    "local": "Skills/Frontend/Emil-skills-main/skills-main",
+    "repo": "https://github.com/emilkowalski/skills.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "impeccable-design-polish",
+    "local": "Skills/Frontend/impeccable-design-polish/impeccable-design-polish",
+    "repo": "https://github.com/pbakaus/impeccable.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "modern-web-guidance",
+    "local": "Skills/Frontend/modern-web-guidance-main/modern-web-guidance-main",
+    "repo": "https://github.com/GoogleChrome/modern-web-guidance-src.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "taste-skill",
+    "local": "Skills/Frontend/taste-skill-main/taste-skill-main",
+    "repo": "https://github.com/Leonxlnx/taste-skill.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "humanizer",
+    "local": "Skills/Writing/humanizer",
+    "repo": "https://github.com/blader/humanizer.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "aihot",
+    "local": "Skills/Misc/aihot",
+    "repo": "https://github.com/KKKKhazix/khazix-skills.git",
+    "branch": "main",
+    "path": "aihot"
+  },
+  {
+    "name": "storage-analyzer",
+    "local": "Skills/Misc/storage-analyzer",
+    "repo": "https://github.com/KKKKhazix/khazix-skills.git",
+    "branch": "main",
+    "path": "storage-analyzer"
+  },
+  {
+    "name": "skill-from-masters",
+    "local": "Skills/One4All Skill Creator/skill-from-masters-main",
+    "repo": "https://github.com/GBSOSS/skill-from-masters.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "architecture-copilot",
+    "local": "Skills/Engineering/Development/architecture-copilot",
+    "repo": "https://github.com/study8677/architecture-copilot.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "oh-my-mermaid",
+    "local": "Skills/Charts/oh-my-mermaid",
+    "repo": "https://github.com/oh-my-mermaid/oh-my-mermaid.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "codegraph",
+    "local": "Skills/Engineering/Development/codegraph",
+    "repo": "https://github.com/colbymchenry/codegraph.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "readme-ai",
+    "local": "Skills/Engineering/Development/readme-ai",
+    "repo": "https://github.com/eli64s/readme-ai.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "rendercv",
+    "local": "Skills/Career/rendercv",
+    "repo": "https://github.com/rendercv/rendercv.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "powerbi-modeling-mcp",
+    "local": "Skills/Data Analytic/Power BI/powerbi-modeling-mcp",
+    "repo": "https://github.com/microsoft/powerbi-modeling-mcp.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "design-md",
+    "local": "Skills/Frontend/design.md",
+    "repo": "https://github.com/google-labs-code/design.md.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "rea",
+    "local": "Skills/Engineering/rea",
+    "repo": "https://github.com/morluto/rea.git",
+    "branch": "main",
+    "path": "."
+  },
+  {
+    "name": "prompt-engineering",
+    "local": "Skills/Engineering/Agentic AI Development/prompt-engineering",
+    "repo": "https://github.com/davila7/claude-code-templates.git",
+    "branch": "main",
+    "path": "cli-tool/components/skills/ai-research/prompt-engineering"
+  },
+  {
+    "name": "openrig-context-engineering",
+    "local": "Skills/Engineering/Agentic AI Development/openrig-context-engineering",
+    "repo": "https://github.com/mvschwarz/openrig.git",
+    "branch": "main",
+    "path": "packages/daemon/specs/agents/shared/skills/process/context-engineering"
+  },
+  {
+    "name": "agent-evaluation",
+    "local": "Skills/Engineering/Agentic AI Development/agent-evaluation",
+    "repo": "https://github.com/davila7/claude-code-templates.git",
+    "branch": "main",
+    "path": "cli-tool/components/skills/ai-research/agent-evaluation"
+  },
+  {
+    "name": "autonomous-agent-patterns",
+    "local": "Skills/Engineering/Agentic AI Development/autonomous-agent-patterns",
+    "repo": "https://github.com/davila7/claude-code-templates.git",
+    "branch": "main",
+    "path": "cli-tool/components/skills/ai-research/autonomous-agent-patterns"
+  },
+  {
+    "name": "autonomous-agents",
+    "local": "Skills/Engineering/Agentic AI Development/autonomous-agents",
+    "repo": "https://github.com/davila7/claude-code-templates.git",
+    "branch": "main",
+    "path": "cli-tool/components/skills/ai-research/autonomous-agents"
+  },
+  {
+    "name": "context-window-management",
+    "local": "Skills/Engineering/Agentic AI Development/context-window-management",
+    "repo": "https://github.com/davila7/claude-code-templates.git",
+    "branch": "main",
+    "path": "cli-tool/components/skills/ai-research/context-window-management"
+  }
+]
+
