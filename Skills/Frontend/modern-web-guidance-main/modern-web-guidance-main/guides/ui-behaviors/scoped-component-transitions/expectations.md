@@ -1,0 +1,7 @@
+- Component state updates are wrapped in an element-scoped view transition by calling `startViewTransition()` on a specific element rather than `document.startViewTransition()`.
+- Feature detection checks for `startViewTransition` support on `Element.prototype` or the target `Element` instance (such as `'startViewTransition' in Element.prototype` or `typeof scopeEl.startViewTransition === 'function'`) rather than only checking `document.startViewTransition`.
+- When element-scoped view transitions are not supported, the DOM update callback executes immediately as a fallback without throwing an error.
+- Child elements that animate within the scoped container are assigned a `view-transition-name` (such as `match-element` or a scope-unique identifier).
+- When reordering or updating existing child elements inside the scoped container, the DOM update preserves and moves existing element nodes rather than recreating them from scratch.
+- When the scoped container element clips its overflow (`overflow: clip`, `hidden`, or `scroll`) or changes geometry during a transition, it does not set `view-transition-name: none` so that it remains self-participating and clips its transitioning children.
+- A `@media (prefers-reduced-motion: reduce)` rule disables view transition animations (setting `animation: none`) on `::view-transition-group(*)`, `::view-transition-old(*)`, and `::view-transition-new(*)`.

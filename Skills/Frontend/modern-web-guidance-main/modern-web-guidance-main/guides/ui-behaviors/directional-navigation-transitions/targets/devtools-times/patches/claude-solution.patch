@@ -1,0 +1,212 @@
+diff --git a/src/components/TopStoriesCarousel.astro b/src/components/TopStoriesCarousel.astro
+new file mode 100644
+index 0000000..05f3bfb
+--- /dev/null
++++ b/src/components/TopStoriesCarousel.astro
+@@ -0,0 +1,172 @@
++---
++import type { CollectionEntry } from 'astro:content';
++import { ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
++
++export interface Props {
++    articles: CollectionEntry<'articles'>[];
++}
++
++const { articles } = Astro.props;
++const total = articles.length;
++---
++<section
++    class="bg-white border-b border-gray-300"
++    aria-roledescription="carousel"
++    aria-label="Top Stories"
++    data-top-stories-carousel
++>
++    <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center gap-4">
++        <button
++            type="button"
++            class="shrink-0 p-2 rounded-full text-gray-700 hover:text-amber-400 hover:bg-gray-100 focus-visible:outline-2 focus-visible:outline-amber-400 disabled:opacity-40 disabled:pointer-events-none"
++            aria-label="Previous story"
++            data-carousel-prev
++            disabled={total < 2}
++        >
++            <ChevronLeftIcon className="w-5 h-5" aria-hidden="true" />
++        </button>
++
++        <div class="top-story-viewport flex-1 min-w-0 overflow-hidden" aria-live="polite">
++            {articles.map((article, index) => (
++                <div
++                    class="top-story-slide"
++                    role="group"
++                    aria-roledescription="slide"
++                    aria-label={`Story ${index + 1} of ${total}`}
++                    data-carousel-slide
++                    hidden={index !== 0}
++                >
++                    <a href={`${import.meta.env.BASE_URL}articles/${article.id}`}>
++                        <h3 class="font-bold text-gray-900 hover:text-amber-400 cursor-pointer">{article.data.title}</h3>
++                    </a>
++                    <span class="text-xs text-gray-500">{article.data.date.toLocaleDateString()}</span>
++                    <span class="text-xs text-gray-400 ml-2">{index + 1} / {total}</span>
++                </div>
++            ))}
++        </div>
++
++        <button
++            type="button"
++            class="shrink-0 p-2 rounded-full text-gray-700 hover:text-amber-400 hover:bg-gray-100 focus-visible:outline-2 focus-visible:outline-amber-400 disabled:opacity-40 disabled:pointer-events-none"
++            aria-label="Next story"
++            data-carousel-next
++            disabled={total < 2}
++        >
++            <ChevronRightIcon className="w-5 h-5" aria-hidden="true" />
++        </button>
++    </div>
++</section>
++
++<style is:global>
++    /* Only the story area takes part in the carousel's view transition. */
++    .top-story-viewport {
++        view-transition-name: top-story;
++    }
++
++    /* Slide an element out to the left */
++    @keyframes slide-to-left {
++        to { transform: translateX(-100%); }
++    }
++
++    /* Slide an element in from the right */
++    @keyframes slide-from-right {
++        from { transform: translateX(100%); }
++    }
++
++    /* Slide an element out to the right */
++    @keyframes slide-to-right {
++        to { transform: translateX(100%); }
++    }
++
++    /* Slide an element in from the left */
++    @keyframes slide-from-left {
++        from { transform: translateX(-100%); }
++    }
++
++    /* Shared animation settings for the carousel transition */
++    ::view-transition-group(top-story) {
++        animation: 0.4s ease-in-out both;
++    }
++
++    /* Forward ("Next"): old story leaves to the left, new story enters from the right */
++    html:active-view-transition-type(forward)::view-transition-old(top-story) {
++        animation-name: slide-to-left;
++    }
++    html:active-view-transition-type(forward)::view-transition-new(top-story) {
++        animation-name: slide-from-right;
++    }
++
++    /* Backward ("Previous"): old story leaves to the right, new story enters from the left */
++    html:active-view-transition-type(backward)::view-transition-old(top-story) {
++        animation-name: slide-to-right;
++    }
++    html:active-view-transition-type(backward)::view-transition-new(top-story) {
++        animation-name: slide-from-left;
++    }
++
++    @media (prefers-reduced-motion: reduce) {
++        ::view-transition-group(top-story),
++        ::view-transition-old(top-story),
++        ::view-transition-new(top-story) {
++            animation: none !important;
++        }
++    }
++</style>
++
++<script>
++    type Direction = 'forward' | 'backward';
++
++    /**
++     * Navigates to a new view with a directional transition.
++     * Falls back to an immediate DOM update where View Transitions are unsupported.
++     */
++    function navigate(updateDOM: () => void, direction: Direction): void {
++        if (!document.startViewTransition) {
++            updateDOM();
++            return;
++        }
++
++        document.startViewTransition({
++            update: updateDOM,
++            types: [direction],
++        });
++    }
++
++    function initCarousel(root: HTMLElement): void {
++        if (root.dataset.carouselReady === 'true') return;
++        root.dataset.carouselReady = 'true';
++
++        const slides = Array.from(root.querySelectorAll<HTMLElement>('[data-carousel-slide]'));
++        const prevButton = root.querySelector<HTMLButtonElement>('[data-carousel-prev]');
++        const nextButton = root.querySelector<HTMLButtonElement>('[data-carousel-next]');
++        if (slides.length < 2 || !prevButton || !nextButton) return;
++
++        let current = Math.max(0, slides.findIndex((slide) => !slide.hidden));
++
++        const render = (index: number): void => {
++            slides.forEach((slide, i) => {
++                slide.hidden = i !== index;
++            });
++        };
++
++        const go = (direction: Direction): void => {
++            const delta = direction === 'forward' ? 1 : -1;
++            // Update the logical index synchronously so rapid clicks stay consistent.
++            current = (current + delta + slides.length) % slides.length;
++            const target = current;
++            navigate(() => render(target), direction);
++        };
++
++        nextButton.addEventListener('click', () => go('forward'));
++        prevButton.addEventListener('click', () => go('backward'));
++    }
++
++    function initAll(): void {
++        document
++            .querySelectorAll<HTMLElement>('[data-top-stories-carousel]')
++            .forEach(initCarousel);
++    }
++
++    // Re-initialise after Astro ClientRouter navigations as well as the initial load.
++    document.addEventListener('astro:page-load', initAll);
++</script>
+diff --git a/src/pages/index.astro b/src/pages/index.astro
+index 92f6399..5eca5b5 100644
+--- a/src/pages/index.astro
++++ b/src/pages/index.astro
+@@ -2,6 +2,7 @@
+ import Layout from '../layouts/Layout.astro';
+ import ArticleTeaser from '../components/ArticleTeaser.astro';
+ import TopStoryTeaserGrid from '../components/TopStoryTeaserGrid.astro';
++import TopStoriesCarousel from '../components/TopStoriesCarousel.astro';
+ import Ad from '../components/AdSlotBanner';
+ import { getCollection } from 'astro:content';
+ import SimpleTeaserGrid from '../components/SimpleTeaserGrid.astro';
+@@ -39,20 +40,7 @@ politicsArticles[2] = {
+ 
+ <Layout title="The DevTools Times">
+     <!-- Top Stories Bar -->
+-    <div class="bg-white border-b border-gray-300">
+-        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+-                {topStories.map(article => (
+-                    <div class="border-l border-gray-300 pl-4 first:border-l-0 first:pl-0">
+-                        <a href={`${import.meta.env.BASE_URL}articles/${article.id}`}>
+-                            <h3 class="font-bold text-gray-900 hover:text-amber-400 cursor-pointer">{article.data.title}</h3>
+-                        </a>
+-                        <span class="text-xs text-gray-500">{article.data.date.toLocaleDateString()}</span>
+-                    </div>
+-                ))}
+-            </div>
+-        </div>
+-    </div>
++    <TopStoriesCarousel articles={topStories} />
+ 
+     <!-- Main Content Area -->
+     <main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-6 mt-6">

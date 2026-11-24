@@ -1,0 +1,158 @@
+diff --git a/src/components/Header.astro b/src/components/Header.astro
+index 980b279..14decd4 100644
+--- a/src/components/Header.astro
++++ b/src/components/Header.astro
+@@ -21,6 +21,7 @@ const todaysDate = new Date().toLocaleDateString('en-US', { weekday: 'long', yea
+       <div class="flex items-center space-x-3">
+         <SearchButton client:load />
+         <ReadingListButton client:load />
++        <a href={`${baseUrl}local-resources`} class="text-xs font-semibold hover:underline">Local resources</a>
+       </div>
+ 
+       <!-- Right: Buttons -->
+diff --git a/src/components/LocalResourceConnector.tsx b/src/components/LocalResourceConnector.tsx
+new file mode 100644
+index 0000000..9d1c8fc
+--- /dev/null
++++ b/src/components/LocalResourceConnector.tsx
+@@ -0,0 +1,123 @@
++import { useEffect, useRef, useState } from 'react';
++
++type AddressSpace = 'local' | 'loopback';
++type NetworkRequestInit = RequestInit & { targetAddressSpace: AddressSpace };
++type NetworkPermissionDescriptor = { name: 'local-network' | 'loopback-network' };
++
++export default function LocalResourceConnector() {
++  const [space, setSpace] = useState<AddressSpace>('local');
++  const [url, setUrl] = useState('');
++  const [permission, setPermission] = useState<PermissionState>('prompt');
++  const [checking, setChecking] = useState(true);
++  const [secure, setSecure] = useState(false);
++  const [busy, setBusy] = useState(false);
++  const [message, setMessage] = useState('');
++  const [result, setResult] = useState('');
++  const controller = useRef<AbortController | null>(null);
++  const generation = useRef(0);
++
++  useEffect(() => {
++    // Require HTTPS even on development origins considered potentially trustworthy.
++    setSecure(window.isSecureContext && window.location.protocol === 'https:');
++    let disposed = false;
++    let status: PermissionStatus | undefined;
++    const update = () => {
++      if (!disposed && status) {
++        setPermission(status.state);
++        if (status.state === 'denied') controller.current?.abort();
++      }
++    };
++    setChecking(true);
++    setPermission('prompt');
++    void (async () => {
++      try {
++        const descriptor: NetworkPermissionDescriptor = { name: `${space}-network` };
++        // DOM typings may lag the granular LNA permission names. Keep the cast
++        // isolated here; never query the unsafe legacy combined permission.
++        status = await navigator.permissions.query(descriptor as unknown as PermissionDescriptor);
++        if (disposed) return;
++        update();
++        status.addEventListener('change', update);
++      } catch {
++        // Unsupported Permissions API/names: still require an explicit click.
++        if (!disposed) setPermission('prompt');
++      } finally {
++        if (!disposed) setChecking(false);
++      }
++    })();
++    return () => {
++      disposed = true;
++      status?.removeEventListener('change', update);
++      generation.current++;
++      controller.current?.abort();
++    };
++  }, [space]);
++
++  async function connect(event: React.FormEvent<HTMLFormElement>) {
++    event.preventDefault();
++    if (!secure || checking || busy || permission === 'denied') return;
++    setMessage('');
++    setResult('');
++    let endpoint: URL;
++    try {
++      endpoint = new URL(url);
++      if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
++        throw new Error('Use an HTTP or HTTPS URL without embedded credentials.');
++      }
++    } catch {
++      setMessage('Enter a complete HTTP or HTTPS endpoint URL without embedded credentials.');
++      return;
++    }
++
++    const requestGeneration = ++generation.current;
++    const abort = new AbortController();
++    controller.current = abort;
++    const timeout = window.setTimeout(() => abort.abort(), 15000);
++    setBusy(true);
++    try {
++      const options: NetworkRequestInit = {
++        method: 'GET', mode: 'cors', credentials: 'omit', cache: 'no-store',
++        redirect: 'error', targetAddressSpace: space, signal: abort.signal,
++      };
++      // Initiated directly by the form submission, never during page load.
++      const response = await fetch(new Request(endpoint, options));
++      if (!response.ok) throw new Error(`Endpoint returned HTTP ${response.status}.`);
++      const body = await response.text();
++      if (generation.current === requestGeneration) {
++        setResult(body || '(Empty response)');
++        setMessage(`Connected successfully (HTTP ${response.status}).`);
++      }
++    } catch (error) {
++      if (generation.current === requestGeneration) {
++        const reason = error instanceof Error && error.message.startsWith('Endpoint returned HTTP')
++          ? error.message : 'Connection failed, was blocked, or timed out.';
++        setMessage(`${reason} Check the address and selected address space, ensure the device or companion app is running, and check browser site permissions. For a LAN device, connect to the same network. The endpoint must also allow this website through CORS.`);
++      }
++    } finally {
++      window.clearTimeout(timeout);
++      if (generation.current === requestGeneration) setBusy(false);
++    }
++  }
++
++  return (
++    <form onSubmit={connect} className="space-y-4">
++      <p>Read an HTTP endpoint on a device you trust or a companion app on this computer. Your browser may ask for network access when you connect. The request runs in your browser.</p>
++      {!secure && <p role="alert" className="text-red-800">Open this website over HTTPS to connect to local resources.</p>}
++      <label className="block font-semibold">Resource location
++        <select className="block border rounded p-2 mt-1 w-full" value={space} disabled={busy} onChange={event => { setSpace(event.target.value as AddressSpace); setMessage(''); setResult(''); }}>
++          <option value="local">Local network device (private IP or .local hostname)</option>
++          <option value="loopback">This computer (localhost, 127.0.0.1, or [::1])</option>
++        </select>
++      </label>
++      <label className="block font-semibold">Endpoint URL
++        <input type="url" required value={url} disabled={busy} onChange={event => { setUrl(event.target.value); setResult(''); setMessage(''); }} placeholder={space === 'local' ? 'http://device.local:8080/api/status' : 'http://127.0.0.1:45678/health'} className="block border rounded p-2 mt-1 w-full" />
++      </label>
++      <p aria-live="polite">{space === 'local' ? 'Local network' : 'Loopback network'} permission: {checking ? 'checking…' : permission}</p>
++      {permission === 'denied' && <p role="alert" className="text-red-800">Access is blocked. Open this browser’s site settings for this website, allow {space === 'local' ? 'Local network' : 'Loopback network'} access, then retry. Reload this page if the permission status does not update.</p>}
++      <button type="submit" disabled={!secure || checking || busy || permission === 'denied'} className="bg-gray-800 text-white rounded px-4 py-2 disabled:opacity-50">{busy ? 'Connecting…' : 'Connect and read resource'}</button>
++      <p className="text-sm text-gray-600">The endpoint must return an Access-Control-Allow-Origin header allowing this website’s origin. Use an endpoint intended for read-only GET requests. Older browsers may block HTTP resources even after you click Connect.</p>
++      <p role="status" className="break-words">{message}</p>
++      {result && <pre aria-label="Resource response" className="bg-gray-100 p-4 overflow-auto max-h-96 whitespace-pre-wrap break-words">{result}</pre>}
++    </form>
++  );
++}
+diff --git a/src/pages/local-resources.astro b/src/pages/local-resources.astro
+new file mode 100644
+index 0000000..a8a5301
+--- /dev/null
++++ b/src/pages/local-resources.astro
+@@ -0,0 +1,11 @@
++---
++import Layout from '../layouts/Layout.astro';
++import LocalResourceConnector from '../components/LocalResourceConnector';
++---
++
++<Layout title="Local resources | The DevTools Times">
++  <section class="max-w-3xl mx-auto p-6">
++    <h1 class="text-3xl font-bold mb-4">Local resources</h1>
++    <LocalResourceConnector client:load />
++  </section>
++</Layout>

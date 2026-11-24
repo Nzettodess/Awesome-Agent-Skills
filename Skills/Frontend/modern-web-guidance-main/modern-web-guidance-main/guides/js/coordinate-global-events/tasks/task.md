@@ -1,0 +1,1 @@
+- Build a global coffee tasting event coordinator in index.html with inputs for date (#dateInput), time (#timeInput), and host timezone (#hostTzSelect) that renders cards in #grid showing DST-aware converted times across target time zones (including Tokyo), handling timezone conversion and rejecting invalid times during daylight saving transitions.

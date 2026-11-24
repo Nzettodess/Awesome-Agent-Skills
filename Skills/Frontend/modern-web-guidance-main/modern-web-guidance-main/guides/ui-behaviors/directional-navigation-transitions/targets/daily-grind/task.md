@@ -1,0 +1,1 @@
+- Make the Seasonal Favorites section on The Daily Grind homepage show one drink card at a time, with Next and Previous buttons to step through them, and animate each change to reflect the direction of travel so advancing with Next slides the new item in from the right and returning with Previous slides it in from the left.

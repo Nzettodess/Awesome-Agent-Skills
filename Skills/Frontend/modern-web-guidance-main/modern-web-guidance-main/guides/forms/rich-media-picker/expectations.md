@@ -1,0 +1,13 @@
+- The `<select>` element MUST have `appearance: base-select` applied to opt into the customizable state.
+- The `::picker(select)` pseudo-element MUST have `appearance: base-select` applied to opt into the customizable state.
+- The `<select>` element MUST contain a `<button>` tag as a direct child.
+- The `<button>` tag MUST contain a `<selectedcontent>` element to mirror selections.
+- The `<button>` tag MUST NOT contain legacy `<selectedoption>` element to mirror selections.
+- The `<option>` tags MUST contain rich HTML formatting (e.g., `<svg>`, `<div>`, or `<span>`) instead of plaintext only.
+- The `::picker(select)` popup MUST use the CSS Anchor Positioning API (e.g., `width: anchor-size(width)`) to align itself with the button trigger.
+- The implementation MUST NOT rely on heavy custom JavaScript to replicate keyboard focus or top-layer rendering if `appearance: base-select` is supported natively.
+- The `<select>` MUST have a `name` attribute and an associated `<label>`. This ensures that even with a custom UI, the component remains accessible to screen readers and works correctly with standard form submissions.
+- Decorative inline SVG icons inside `<option>` elements MUST explicitly define `aria-hidden="true"`.
+- The checked state of an `<option>` MUST be indicated by multiple visual cues (e.g., changing both background color and title font weight) to avoid color-only state communication.
+- The `<option>` tags MUST NOT contain interactive elements (e.g., `<button>` or `<a href="…">`) or elements that have implicit or explicit semantics (e.g., `<h1>` through to `<h6>`), as this information will not be conveyed by screen readers
+- The selected `<option>` element must visibly convey its state (e.g. using a custom icon, sufficiently contrasting outline, or sufficiently contrasting background color)

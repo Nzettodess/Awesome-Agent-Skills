@@ -1,0 +1,461 @@
+diff --git a/index.html b/index.html
+index 66c9173..29ace95 100644
+--- a/index.html
++++ b/index.html
+@@ -152,7 +152,23 @@
+       text-decoration: none;
+       font-size: 0.85rem;
+     }
++
++    @view-transition {
++      navigation: auto;
++    }
++
++    @media (prefers-reduced-motion: reduce) {
++      @view-transition {
++        navigation: none;
++      }
++    }
+   </style>
++  <script type="module" blocking="render">
++    document.documentElement.dataset.theme =
++      localStorage.getItem('theme') || 'light';
++  </script>
++  <link rel="expect" href="#hero" blocking="render">
++  <link rel="expect" href="#seasonal-favorites" blocking="render">
+ </head>
+ 
+ <body>
+@@ -168,14 +184,14 @@
+     </ul>
+   </nav>
+ 
+-  <header class="hero">
++  <header class="hero" id="hero">
+     <h1>Wake Up Your Senses</h1>
+     <p>Ethically sourced, locally roasted, delivered to your cup.</p>
+     <a href="/order-online" class="btn">Order Now</a>
+   </header>
+ 
+   <main class="container">
+-    <section>
++    <section id="seasonal-favorites">
+       <h2 style="text-align: center;">Seasonal Favorites</h2>
+       <div class="grid">
+         <div class="card">
+diff --git a/index.html b/locations.html
+similarity index 56%
+copy from index.html
+copy to locations.html
+index 66c9173..e0e6ebc 100644
+--- a/index.html
++++ b/locations.html
+@@ -4,7 +4,7 @@
+ <head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-  <title>The Daily Grind | Artisanal Coffee</title>
++  <title>Locations | The Daily Grind</title>
+   <style>
+     :root {
+       --primary: #4e342e;
+@@ -72,25 +72,22 @@
+       border-radius: 4px;
+     }
+ 
+-    /* Hero Section */
+-    .hero {
+-      height: 60vh;
+-      background: linear-gradient(rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0.5)),
+-        url('https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=1350&q=80');
+-      background-size: cover;
+-      background-position: center;
+-      display: flex;
+-      flex-direction: column;
+-      justify-content: center;
+-      align-items: center;
++    /* Locations Hero */
++    .locations-hero {
++      background: var(--primary);
+       color: white;
++      padding: 60px 20px;
+       text-align: center;
+-      padding: 0 20px;
+     }
+ 
+-    .hero h1 {
+-      font-size: 3rem;
+-      margin-bottom: 1rem;
++    .locations-hero h1 {
++      font-size: 2.5rem;
++      margin-bottom: 0.5rem;
++    }
++
++    .locations-hero p {
++      font-size: 1.1rem;
++      opacity: 0.85;
+     }
+ 
+     /* Content Sections */
+@@ -102,37 +99,35 @@
+ 
+     .grid {
+       display: grid;
+-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+-      gap: 20px;
++      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
++      gap: 24px;
+       margin-top: 20px;
+     }
+ 
+-    .card {
++    .location-card {
+       background: white;
+-      padding: 20px;
++      padding: 24px;
+       border-radius: 8px;
+       box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+-      text-align: center;
+     }
+ 
+-    .card h3 {
+-      margin-bottom: 10px;
++    .location-card h2 {
+       color: var(--primary);
++      margin-bottom: 8px;
+     }
+ 
+-    .btn {
+-      display: inline-block;
+-      background: var(--primary);
+-      color: white;
+-      padding: 10px 20px;
+-      text-decoration: none;
+-      border-radius: 5px;
+-      margin-top: 15px;
+-      transition: background 0.3s;
++    .location-card p {
++      margin-bottom: 4px;
+     }
+ 
+-    .btn:hover {
+-      background: #3e2723;
++    .location-card .hours {
++      margin-top: 12px;
++      font-size: 0.9rem;
++      color: #666;
++    }
++
++    .location-card .hours strong {
++      color: var(--text);
+     }
+ 
+     footer {
+@@ -152,13 +147,29 @@
+       text-decoration: none;
+       font-size: 0.85rem;
+     }
++
++    @view-transition {
++      navigation: auto;
++    }
++
++    @media (prefers-reduced-motion: reduce) {
++      @view-transition {
++        navigation: none;
++      }
++    }
+   </style>
++  <script type="module" blocking="render">
++    document.documentElement.dataset.theme =
++      localStorage.getItem('theme') || 'light';
++  </script>
++  <link rel="expect" href="#locations-hero" blocking="render">
++  <link rel="expect" href="#locations-list" blocking="render">
+ </head>
+ 
+ <body>
+ 
+   <nav>
+-    <div class="logo">THE DAILY GRIND</div>
++    <a href="/" class="logo">THE DAILY GRIND</a>
+     <ul>
+       <li><a href="/menu">Menu</a></li>
+       <li><a href="/locations">Locations</a></li>
+@@ -168,30 +179,43 @@
+     </ul>
+   </nav>
+ 
+-  <header class="hero">
+-    <h1>Wake Up Your Senses</h1>
+-    <p>Ethically sourced, locally roasted, delivered to your cup.</p>
+-    <a href="/order-online" class="btn">Order Now</a>
++  <header class="locations-hero" id="locations-hero">
++    <h1>Find Us</h1>
++    <p>Visit one of our neighborhood cafés.</p>
+   </header>
+ 
+   <main class="container">
+-    <section>
+-      <h2 style="text-align: center;">Seasonal Favorites</h2>
++    <section id="locations-list">
+       <div class="grid">
+-        <div class="card">
+-          <h3>Maple Oat Latte</h3>
+-          <p>Creamy oat milk with a hint of Vermont maple syrup.</p>
+-          <a href="/menu/seasonal" class="btn">View Details</a>
++        <div class="location-card">
++          <h2>Downtown</h2>
++          <p>42 Main Street</p>
++          <p>Springfield, ST 01103</p>
++          <div class="hours">
++            <strong>Hours</strong><br>
++            Mon–Fri: 6am – 8pm<br>
++            Sat–Sun: 7am – 6pm
++          </div>
+         </div>
+-        <div class="card">
+-          <h3>Dark Roast Espresso</h3>
+-          <p>Bold, smokey, and perfect for a morning boost.</p>
+-          <a href="/menu/espresso" class="btn">View Details</a>
++        <div class="location-card">
++          <h2>Eastside</h2>
++          <p>88 Elm Avenue</p>
++          <p>Springfield, ST 01108</p>
++          <div class="hours">
++            <strong>Hours</strong><br>
++            Mon–Fri: 6:30am – 7pm<br>
++            Sat–Sun: 7:30am – 5pm
++          </div>
+         </div>
+-        <div class="card">
+-          <h3>Cold Brew</h3>
+-          <p>Steeped for 18 hours for maximum smoothness.</p>
+-          <a href="/menu/cold-brew" class="btn">View Details</a>
++        <div class="location-card">
++          <h2>Riverside</h2>
++          <p>210 River Road</p>
++          <p>Springfield, ST 01105</p>
++          <div class="hours">
++            <strong>Hours</strong><br>
++            Mon–Fri: 7am – 6pm<br>
++            Sat–Sun: 8am – 4pm
++          </div>
+         </div>
+       </div>
+     </section>
+diff --git a/index.html b/menu.html
+similarity index 53%
+copy from index.html
+copy to menu.html
+index 66c9173..e83620d 100644
+--- a/index.html
++++ b/menu.html
+@@ -4,7 +4,7 @@
+ <head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-  <title>The Daily Grind | Artisanal Coffee</title>
++  <title>Menu | The Daily Grind</title>
+   <style>
+     :root {
+       --primary: #4e342e;
+@@ -72,25 +72,22 @@
+       border-radius: 4px;
+     }
+ 
+-    /* Hero Section */
+-    .hero {
+-      height: 60vh;
+-      background: linear-gradient(rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0.5)),
+-        url('https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=1350&q=80');
+-      background-size: cover;
+-      background-position: center;
+-      display: flex;
+-      flex-direction: column;
+-      justify-content: center;
+-      align-items: center;
++    /* Menu Hero */
++    .menu-hero {
++      background: var(--primary);
+       color: white;
++      padding: 60px 20px;
+       text-align: center;
+-      padding: 0 20px;
+     }
+ 
+-    .hero h1 {
+-      font-size: 3rem;
+-      margin-bottom: 1rem;
++    .menu-hero h1 {
++      font-size: 2.5rem;
++      margin-bottom: 0.5rem;
++    }
++
++    .menu-hero p {
++      font-size: 1.1rem;
++      opacity: 0.85;
+     }
+ 
+     /* Content Sections */
+@@ -100,11 +97,22 @@
+       padding: 0 20px;
+     }
+ 
++    .menu-category {
++      margin-bottom: 40px;
++    }
++
++    .menu-category h2 {
++      font-size: 1.5rem;
++      color: var(--primary);
++      border-bottom: 2px solid var(--secondary);
++      padding-bottom: 8px;
++      margin-bottom: 20px;
++    }
++
+     .grid {
+       display: grid;
+       grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+       gap: 20px;
+-      margin-top: 20px;
+     }
+ 
+     .card {
+@@ -112,27 +120,17 @@
+       padding: 20px;
+       border-radius: 8px;
+       box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+-      text-align: center;
+     }
+ 
+     .card h3 {
+-      margin-bottom: 10px;
++      margin-bottom: 8px;
+       color: var(--primary);
+     }
+ 
+-    .btn {
+-      display: inline-block;
+-      background: var(--primary);
+-      color: white;
+-      padding: 10px 20px;
+-      text-decoration: none;
+-      border-radius: 5px;
+-      margin-top: 15px;
+-      transition: background 0.3s;
+-    }
+-
+-    .btn:hover {
+-      background: #3e2723;
++    .card .price {
++      font-weight: bold;
++      color: var(--accent);
++      margin-top: 8px;
+     }
+ 
+     footer {
+@@ -152,13 +150,29 @@
+       text-decoration: none;
+       font-size: 0.85rem;
+     }
++
++    @view-transition {
++      navigation: auto;
++    }
++
++    @media (prefers-reduced-motion: reduce) {
++      @view-transition {
++        navigation: none;
++      }
++    }
+   </style>
++  <script type="module" blocking="render">
++    document.documentElement.dataset.theme =
++      localStorage.getItem('theme') || 'light';
++  </script>
++  <link rel="expect" href="#menu-hero" blocking="render">
++  <link rel="expect" href="#menu-categories" blocking="render">
+ </head>
+ 
+ <body>
+ 
+   <nav>
+-    <div class="logo">THE DAILY GRIND</div>
++    <a href="/" class="logo">THE DAILY GRIND</a>
+     <ul>
+       <li><a href="/menu">Menu</a></li>
+       <li><a href="/locations">Locations</a></li>
+@@ -168,30 +182,52 @@
+     </ul>
+   </nav>
+ 
+-  <header class="hero">
+-    <h1>Wake Up Your Senses</h1>
+-    <p>Ethically sourced, locally roasted, delivered to your cup.</p>
+-    <a href="/order-online" class="btn">Order Now</a>
++  <header class="menu-hero" id="menu-hero">
++    <h1>Our Menu</h1>
++    <p>Crafted with care, brewed to perfection.</p>
+   </header>
+ 
+   <main class="container">
+-    <section>
+-      <h2 style="text-align: center;">Seasonal Favorites</h2>
+-      <div class="grid">
+-        <div class="card">
+-          <h3>Maple Oat Latte</h3>
+-          <p>Creamy oat milk with a hint of Vermont maple syrup.</p>
+-          <a href="/menu/seasonal" class="btn">View Details</a>
++    <section id="menu-categories">
++      <div class="menu-category">
++        <h2>Seasonal Favorites</h2>
++        <div class="grid">
++          <div class="card">
++            <h3>Maple Oat Latte</h3>
++            <p>Creamy oat milk with a hint of Vermont maple syrup.</p>
++            <p class="price">$6.50</p>
++          </div>
++          <div class="card">
++            <h3>Dark Roast Espresso</h3>
++            <p>Bold, smokey, and perfect for a morning boost.</p>
++            <p class="price">$4.00</p>
++          </div>
++          <div class="card">
++            <h3>Cold Brew</h3>
++            <p>Steeped for 18 hours for maximum smoothness.</p>
++            <p class="price">$5.50</p>
++          </div>
+         </div>
+-        <div class="card">
+-          <h3>Dark Roast Espresso</h3>
+-          <p>Bold, smokey, and perfect for a morning boost.</p>
+-          <a href="/menu/espresso" class="btn">View Details</a>
+-        </div>
+-        <div class="card">
+-          <h3>Cold Brew</h3>
+-          <p>Steeped for 18 hours for maximum smoothness.</p>
+-          <a href="/menu/cold-brew" class="btn">View Details</a>
++      </div>
++
++      <div class="menu-category">
++        <h2>Hot Drinks</h2>
++        <div class="grid">
++          <div class="card">
++            <h3>Drip Coffee</h3>
++            <p>House-roasted single origin, brewed fresh every hour.</p>
++            <p class="price">$3.00</p>
++          </div>
++          <div class="card">
++            <h3>Cappuccino</h3>
++            <p>Double shot espresso with velvety steamed milk foam.</p>
++            <p class="price">$5.00</p>
++          </div>
++          <div class="card">
++            <h3>Matcha Latte</h3>
++            <p>Ceremonial grade matcha whisked with oat milk.</p>
++            <p class="price">$6.00</p>
++          </div>
+         </div>
+       </div>
+     </section>

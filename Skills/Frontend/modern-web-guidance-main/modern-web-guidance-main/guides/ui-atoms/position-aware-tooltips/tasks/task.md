@@ -1,0 +1,1 @@
+- Add an info tooltip with a directional pointer arrow to the Maple Oat Latte card triggered by an info button (id="anchor"), so the tooltip and its arrow dynamically adapt their orientation when flipped against viewport edges.

@@ -1,0 +1,438 @@
+#!/usr/bin/env node
+
+import { parseArgs } from 'util';
+import path from 'path';
+import fs from 'fs';
+import { spawn, execSync } from 'child_process';
+import omelette from 'omelette';
+import { cRed, cCyan, cBold, cDim } from '../src/core/colors.ts';
+import { resolveSuiteConfig } from '../src/harness/config.ts';
+import { rootDir, guidesDir, baseAppsDir, resultsDir } from '../src/core/paths.ts';
+import { getTaskMap, SUPPORTED_BASE_APPS } from '../src/core/guide-validation.ts';
+import { loadAllowedEnvFile } from '../src/harness/lib/secret-guard.ts';
+
+loadAllowedEnvFile(path.join(rootDir, '.env'));
+
+// --- Single Source of Truth Metadata ---
+
+const ALL_OPTIONS = {
+  help: { type: 'boolean', short: 'h', desc: 'Show this help' },
+  version: { type: 'boolean', short: 'v', desc: 'Show version' },
+  grade: { type: 'boolean', desc: 'Run/calibrate grader' },
+  'test-grader': { type: 'boolean', desc: 'Check grader calibration (solution + zero-passrate)' },
+  'gen-grader': { type: 'boolean', desc: 'Generate a new grader script' },
+  guided: { type: 'boolean', desc: 'Skip calibration, run guided agent trial only' },
+  verbose: { type: 'boolean', desc: 'Show additional output' },
+  config: { type: 'string', desc: 'Custom config file (defaults to root config.ts)' },
+  ui: { type: 'boolean', desc: 'Start the evaluation review UI' },
+  'no-test': { type: 'boolean', desc: 'Skip agent trials after calibration' },
+  'cross-app': { type: 'boolean', desc: 'Also check grader on an unmodified base app' },
+  'dry-run': { type: 'boolean', desc: 'List what would run without running it' },
+  limit: { type: 'string', desc: 'Process at most <n> guides' },
+  targets: { type: 'string', desc: 'Target base app(s), comma-separated (e.g. daily-grind,devtools-times)' },
+  json: { type: 'boolean', desc: 'Output legacy-scan findings in structured JSON format' },
+  guide: { type: 'string', desc: 'Filter legacy-scan to a specific guide ID' },
+  'include-docs-and-tests': { type: 'boolean', desc: 'Include documentation, example, demo, and test files in analysis' },
+  'max-files': { type: 'string', desc: 'Maximum eligible files to scan (default: 5000; 0 for unlimited)' },
+} as const;
+
+type OptionName = keyof typeof ALL_OPTIONS;
+
+const FLAG_ARG_PLACEHOLDER: Partial<Record<OptionName, string>> = {
+  config: ' <path>',
+  limit: ' <n>',
+  targets: ' <apps>',
+  guide: ' <id>',
+  'max-files': ' <count>',
+};
+
+const COMMAND_METADATA = {
+  'legacy-scan': { desc: 'Analyze codebase for legacy web platform patterns', flags: ['json', 'guide', 'include-docs-and-tests', 'max-files'] },
+  dev: { desc: 'Auto-generate and calibrate guide artifacts', flags: ['grade', 'test-grader', 'gen-grader', 'guided', 'no-test', 'cross-app', 'targets'] },
+  'dev-gap': { desc: 'Run dev + pr for each guide missing evals or PR labeled for rerun', flags: ['dry-run', 'limit', 'targets'] },
+  eval: { desc: 'Run the evaluation dataset, or specific tasks', flags: ['config', 'ui'] },
+  dashboard: { desc: 'Start the evaluation dashboard', flags: [] },
+  run: { desc: 'Run an ad-hoc agent trial against a base app', flags: ['config'] },
+  deploy: { desc: 'Deploy the dashboard to GitHub Pages', flags: [] },
+  upload: { desc: 'Upload evaluation job results to GCS', flags: [] },
+  backfill: { desc: 'Backfill metrics for historical jobs', flags: [] },
+  baselinestatus: { desc: 'Check browser support and Baseline status', flags: [] },
+  pr: { desc: 'Push branch and create or update GitHub PR from dev report', flags: [] },
+  compare: { desc: 'Compare two evaluation trials to diagnose performance variance', flags: [] },
+
+  'setup-completion': { desc: 'Install shell auto-completion', flags: [] },
+} satisfies Record<string, { desc: string; flags: OptionName[] }>;
+
+const COMMANDS = Object.keys(COMMAND_METADATA);
+type CommandName = keyof typeof COMMAND_METADATA;
+
+// --- Shell Auto-Completion ---
+
+function listGuideDirs(): string[] {
+  if (!fs.existsSync(guidesDir)) return [];
+  const categories = fs.readdirSync(guidesDir, { withFileTypes: true })
+    .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+    .map(d => d.name);
+  const dirs: string[] = [];
+  for (const cat of categories) {
+    const catDir = path.join(guidesDir, cat);
+    if (!fs.existsSync(catDir)) continue;
+    for (const entry of fs.readdirSync(catDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) dirs.push(`guides/${cat}/${entry.name}`);
+    }
+  }
+  return dirs;
+}
+
+function getFlagsForLine(line: string): string[] {
+  const parts = line.split(/\s+/).filter(Boolean);
+  const cmd = parts[1] as CommandName;
+  const meta = COMMAND_METADATA[cmd];
+  const baseFlags = meta ? meta.flags : [];
+  return [...new Set([...baseFlags, 'verbose'])].map(f => '--' + f);
+}
+
+const completion = omelette('gd <command> <arg1> <arg2> <arg3> <arg4> <arg5>');
+
+completion.on('command', ({ reply }) => reply(COMMANDS));
+
+function listResultsRunDirs(): string[] {
+  try {
+    return fs.readdirSync(resultsDir, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+  } catch {
+    return [];
+  }
+}
+
+completion.on('arg1', ({ before, line, reply }) => {
+  const flags = getFlagsForLine(line);
+  if (before === 'eval') {
+    const tasks = Array.from(getTaskMap().keys());
+    reply(['suite', ...tasks, ...listGuideDirs(), ...flags]);
+  } else if (before === 'compare') {
+    reply([...listResultsRunDirs(), ...flags]);
+  } else if (before === 'gen') {
+    reply(['grader']);
+  } else if (['dev', 'test', 'grade', 'pr'].includes(before)) {
+    reply([...listGuideDirs(), ...flags]);
+  } else {
+    reply(flags);
+  }
+});
+
+completion.on('arg2', ({ before, line, reply }) => {
+  const flags = getFlagsForLine(line);
+  if (line.includes('gd eval')) {
+    reply(flags);
+  } else if (line.includes('gd compare')) {
+    reply([...listResultsRunDirs(), ...flags]);
+  } else if (line.includes('gd dev') && before.startsWith('guides/')) {
+    reply(flags);
+  } else if (before === 'run') {
+    if (fs.existsSync(baseAppsDir)) {
+      reply(fs.readdirSync(baseAppsDir).filter(d => fs.statSync(path.join(baseAppsDir, d)).isDirectory()));
+    }
+  } else if (before === 'grader' && line.includes('gen')) {
+    reply(listGuideDirs());
+  } else {
+    reply(flags);
+  }
+});
+
+completion.on('arg3', ({ line, reply }) => reply(getFlagsForLine(line)));
+completion.on('arg4', ({ line, reply }) => reply(getFlagsForLine(line)));
+completion.on('arg5', ({ line, reply }) => reply(getFlagsForLine(line)));
+
+completion.init();
+
+// --- Argument Parsing ---
+
+const parseOptions: any = {};
+for (const [key, val] of Object.entries(ALL_OPTIONS)) {
+  parseOptions[key] = { type: val.type };
+  if ((val as any).short) parseOptions[key].short = (val as any).short;
+}
+
+const { positionals, values } = parseArgs({
+  args: process.argv.slice(2),
+  options: parseOptions,
+  allowPositionals: true,
+  strict: false,
+});
+
+// --- Helpers ---
+
+function spawnChild(command: string, args: string[], options: import('child_process').SpawnOptions = {}): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const p = spawn(command, args, { stdio: 'inherit', cwd: rootDir, ...options });
+    p.on('close', (code) => resolve(code ?? 0));
+    p.on('error', (err) => reject(err));
+  });
+}
+
+function runNpm(args: string[]) {
+  return spawnChild('pnpm', args);
+}
+
+function requireArg(arg: string | undefined, usage: string): string {
+  if (!arg) {
+    console.error(`${cRed('Missing argument.')} Usage: ${usage}`);
+    process.exit(1);
+  }
+  return arg;
+}
+
+function parseTargets(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  const parsed = typeof raw === 'string'
+    ? raw.split(',').map(t => t.trim()).filter(Boolean)
+    : [];
+  const invalid = parsed.filter(t => !(SUPPORTED_BASE_APPS as readonly string[]).includes(t));
+  if (parsed.length === 0 || invalid.length > 0) {
+    console.error(cRed(`Invalid --targets (${invalid.join(', ') || 'empty'}). Supported targets: ${SUPPORTED_BASE_APPS.join(', ')}`));
+    process.exit(1);
+  }
+  return parsed;
+}
+
+// --- Command Routing ---
+
+function showHelp() {
+  const groups = [
+    {
+      title: 'Guide Development',
+      commands: ['dev', 'pr', 'dev-gap'],
+    },
+    {
+      title: 'Codebase Analysis',
+      commands: ['legacy-scan'],
+    },
+    {
+      title: 'Evaluation & Dashboard',
+      commands: ['eval', 'run', 'dashboard', 'deploy', 'upload', 'backfill', 'compare'],
+    },
+    {
+      title: 'Utilities & Setup',
+      commands: ['baselinestatus', 'setup-completion'],
+    },
+  ] as const;
+
+  // AI-First Safety: Enforce at compile-time that every command is documented in the help text
+  type AssertEmpty<_T extends never> = true;
+  type _CheckAllCmdsRendered = AssertEmpty<Exclude<CommandName, typeof groups[number]['commands'][number]>>;
+
+  // AI-First Safety: Enforce that every flag in ALL_OPTIONS is assigned to a command or rendered globally
+  type GlobalFlags = 'help' | 'version' | 'verbose';
+  type CmdFlags = typeof COMMAND_METADATA[keyof typeof COMMAND_METADATA]['flags'][number];
+  type _CheckAllFlagsRendered = AssertEmpty<Exclude<OptionName, GlobalFlags | CmdFlags>>;
+
+  console.log(`\n${cCyan('Usage:')} gd <command> [options]\n`);
+
+  for (const group of groups) {
+    console.log(cBold(group.title));
+    for (const cmd of group.commands) {
+      const meta = COMMAND_METADATA[cmd as CommandName];
+      if (!meta) continue;
+
+      const args = (cmd === 'dev' || cmd === 'pr') ? ' <dir>' : cmd === 'legacy-scan' ? ' [path]' : cmd === 'run' ? ' <base-app> <prompt>' : cmd === 'eval' ? ' [tasks...]' : cmd === 'baselinestatus' ? ' <query>' : cmd === 'compare' ? ' <trialA> <trialB>' : '';
+      console.log(`  ${cCyan((cmd + args).padEnd(28))} ${meta.desc}`);
+
+      if (meta.flags.length > 0) {
+        for (const flagName of meta.flags) {
+          const optVal = ALL_OPTIONS[flagName];
+          const arg = FLAG_ARG_PLACEHOLDER[flagName] ?? '';
+          console.log(`    ${cDim(('--' + flagName + arg).padEnd(26))} ${optVal.desc}`);
+        }
+      }
+    }
+    console.log('');
+  }
+
+  console.log(cBold('Global Options:'));
+  console.log(`  ${cDim('-h, --help'.padEnd(28))} Show this help`);
+  console.log(`  ${cDim('-v, --version'.padEnd(28))} Show version`);
+  console.log(`  ${cDim('    --verbose'.padEnd(28))} ${ALL_OPTIONS.verbose.desc}\n`);
+}
+
+async function main() {
+  const command = positionals[0];
+
+  if (command === 'legacy-scan' || command === 'analyze') {
+    const { runLegacyScanCli, writeLegacyScanCliResult } = await import('../src/legacy-scan/cli.ts');
+    const result = await runLegacyScanCli(process.argv.slice(3));
+    writeLegacyScanCliResult(result);
+    process.exit(result.exitCode);
+  }
+
+  if (values.help || !command) {
+    showHelp();
+    process.exit(0);
+  }
+
+  switch (command) {
+    case 'compare': {
+      const runDirA = requireArg(positionals[1], 'gd compare <trialA> <trialB>');
+      const runDirB = requireArg(positionals[2], 'gd compare <trialA> <trialB>');
+      const { runComparison } = await import('../src/harness/lib/compare-evals.ts');
+      try {
+        await runComparison(runDirA, runDirB);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`Comparison failed: ${msg}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'setup-completion': {
+      completion.setupShellInitFile();
+      console.log('Auto-completion installed. Restart your terminal to apply.');
+      process.exit(0);
+    }
+
+    case 'dev-gap': {
+      if (positionals[1]) {
+        console.error(cRed(`gd dev-gap scans guides on disk; don't pass a guide ('${positionals[1]}').`));
+        process.exit(1);
+      }
+      const { fixEvalGaps } = await import('../src/authoring/dev-gap.ts');
+      const success = await fixEvalGaps({
+        dryRun: !!values['dry-run'],
+        limit: values.limit ? Number(values.limit) : undefined,
+        verbose: !!values.verbose,
+        suiteConfig: await resolveSuiteConfig(values.config as string | undefined),
+        targets: parseTargets(values.targets) ?? ['daily-grind'],
+      });
+      process.exit(success ? 0 : 1);
+    }
+
+    case 'dev': {
+      const dir = requireArg(positionals[1], 'gd dev <path/to/guide>');
+      if (values.grade || values['test-grader']) {
+        const { testGrader } = await import('../src/grading/run-grader.ts');
+        const res = await testGrader(dir);
+        if (!res.success && res.errorDetails) {
+          console.error(cRed(`\nCalibration Error:\n${res.errorDetails}`));
+        }
+        process.exit(res.success ? 0 : 1);
+      }
+      if (values['gen-grader']) {
+        const { generateGrader } = await import('../src/grading/generate-grader.ts');
+        await generateGrader(dir);
+        break;
+      }
+
+      // Default dev-guide pipeline. From main, work on a new gd-dev/ branch so generation and
+      // post-report fixes land in separate commits (an existing branch may be stale, so skip it).
+      const branch = (await import('../src/authoring/pr.ts')).devPrBranch(path.basename(path.resolve(dir)));
+      try {
+        const current = execSync('git branch --show-current', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        if (current === 'main' && fs.existsSync(path.resolve(dir))) {
+          execSync(`git checkout -b "${branch}"`, { stdio: 'ignore' });
+          console.log(cCyan(`Switched to new branch '${branch}'.`));
+        }
+      } catch {
+        console.warn(cDim(`Could not switch to branch '${branch}'; continuing on the current branch.`));
+      }
+      const { devGuide } = await import('../src/authoring/dev.ts');
+      const mergedSuiteConfig = await resolveSuiteConfig(values.config as string | undefined);
+      const success = await devGuide(dir, {
+        guidedOnly: !!values.guided,
+        verbose: !!values.verbose,
+        test: !values['no-test'],
+        suiteConfig: mergedSuiteConfig,
+        targets: parseTargets(values.targets),
+      });
+      process.exit(success ? 0 : 1);
+    }
+
+    // not documented because it's UBER-powerful.
+    case 'dev-all': {
+      const { devAll } = await import('../src/authoring/dev.ts');
+      await devAll({ verbose: !!values.verbose });
+      break;
+    }
+
+    case 'run': {
+      const tmpl = requireArg(positionals[1], 'gd run <base-app> <prompt>');
+      const prompt = requireArg(positionals[2], 'gd run <base-app> <prompt>');
+
+      const mergedSuiteConfig = await resolveSuiteConfig(values.config as string | undefined);
+
+      const { runSingleTask } = await import('../src/harness/run-suite.ts');
+      await runSingleTask(tmpl, prompt, mergedSuiteConfig);
+      break;
+    }
+
+    case 'dashboard': {
+      const { runAllManifests } = await import('../src/dashboard/generate-manifests.js');
+      await runAllManifests();
+      await import('../src/dashboard/server.js');
+      break;
+    }
+
+    case 'eval': {
+      const tasks = positionals.slice(1).filter(a => a !== 'suite');
+      const mergedSuiteConfig = await resolveSuiteConfig(values.config as string | undefined);
+
+      if (values['ui']) {
+        process.env.LAUNCH_UI = 'true';
+        const { runAllManifests } = await import('../src/dashboard/generate-manifests.js');
+        await runAllManifests();
+        await import('../src/dashboard/server.js');
+        break;
+      }
+
+      const { runSuite } = await import('../src/harness/run-suite.ts');
+
+      const runOptions: any = { suiteConfig: mergedSuiteConfig }; // Pass the merged config
+      if (tasks.length > 0) runOptions.tasks = tasks;
+
+      await runSuite(runOptions);
+      break;
+    }
+
+    case 'upload': {
+      const args = positionals.slice(1);
+      const code = await runNpm(['upload', ...args]);
+      process.exit(code);
+    }
+
+    case 'backfill': {
+      const { runBackfill } = await import('../src/harness/backfill.ts');
+      await runBackfill();
+      break;
+    }
+
+    case 'deploy': {
+      const code = await runNpm(['deploy:dashboard']);
+      process.exit(code);
+    }
+
+    case 'baselinestatus': {
+      const args = positionals.slice(1);
+      const code = await runNpm(['baselinestatus', ...args]);
+      process.exit(code);
+    }
+
+    case 'pr': {
+      const dir = requireArg(positionals[1], 'gd pr <path/to/guide>');
+      const { runDevPr } = await import('../src/authoring/pr.ts');
+      const prUrl = await runDevPr(dir);
+      process.exit(prUrl ? 0 : 1);
+    }
+
+
+    default: {
+      console.error(cRed("Unknown command: " + command + ".") + " Run " + cCyan("gd --help") + " for usage.");
+      process.exit(1);
+    }
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

@@ -1,0 +1,12 @@
+import { Agents, type SuiteConfig } from './src/harness/config.ts';
+
+const customConfig: Partial<SuiteConfig> = {
+  agent: Agents.ANTIGRAVITY_CLI,
+  numRuns: 1,
+  tasks: [
+    'guides/built-in-ai/language-detection/targets/daily-grind/task.md',
+    'guides/built-in-ai/language-detection/tasks/task.md',
+  ],
+};
+
+export default customConfig;

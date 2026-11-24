@@ -1,0 +1,163 @@
+diff --git a/src/components/Header.astro b/src/components/Header.astro
+index 980b279..646ae69 100644
+--- a/src/components/Header.astro
++++ b/src/components/Header.astro
+@@ -13,7 +13,7 @@ const baseUrl = import.meta.env.BASE_URL;
+ const todaysDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+ ---
+ 
+-<header class="font-inter group relative bg-white">
++<header id="site-header" class="font-inter group relative bg-white">
+   <!-- Row 1: Search, Subscribe, Log In -->
+   <div class="container mx-auto px-4 py-2 border-b border-gray-300">
+     <div class="flex justify-between items-center">
+diff --git a/src/layouts/Layout.astro b/src/layouts/Layout.astro
+index dcf9696..17536d1 100644
+--- a/src/layouts/Layout.astro
++++ b/src/layouts/Layout.astro
+@@ -4,13 +4,12 @@ import Footer from "../components/Footer.astro";
+ import AdSlotFireplace from "../components/AdSlotFireplace.tsx";
+ import "../styles/global.css";
+ 
+-import { ClientRouter } from "astro:transitions";
+-
+ export interface Props {
+   title: string;
++  transitionContentId?: string;
+ }
+ 
+-const { title } = Astro.props;
++const { title, transitionContentId } = Astro.props;
+ const baseUrl = import.meta.env.BASE_URL;
+ ---
+ 
+@@ -34,7 +33,13 @@ const baseUrl = import.meta.env.BASE_URL;
+ 
+     <link rel="icon" href=`${baseUrl}/favicon.svg` />
+ 
+-    <ClientRouter />
++    {transitionContentId && (
++      <>
++        {/* Wait for the initial viewport, never the full page or footer. */}
++        <link rel="expect" href="#site-header" blocking="render" />
++        <link rel="expect" href={`#${transitionContentId}`} blocking="render" />
++      </>
++    )}
+   </head>
+   <body class="bg-gray-100">
+     <div class="mx-auto">
+diff --git a/src/pages/articles/[slug].astro b/src/pages/articles/[slug].astro
+index 24fea39..dd8b137 100644
+--- a/src/pages/articles/[slug].astro
++++ b/src/pages/articles/[slug].astro
+@@ -35,7 +35,7 @@ const readingList = await Astro.session?.get('readingList') || [];
+ const isBookmarked = readingList.includes(article.slug);
+ ---
+ 
+-<Layout title={article.data.title}>
++<Layout title={article.data.title} transitionContentId="article-lead">
+     <article class="max-w-3xl mx-auto px-4 py-8 md:py-12">
+         <!-- Breadcrumbs/Category -->
+         <div class="text-base text-gray-600 font-semibold mb-2">
+@@ -58,7 +58,7 @@ const isBookmarked = readingList.includes(article.slug);
+         </div>
+ 
+         <!-- Main Article Image -->
+-        <figure class="mb-5">
++        <figure id="article-lead" class="mb-5">
+             {article.data.prompt_comment && <Fragment set:html={`<!-- ${article.data.prompt_comment} -->`} />}
+             {article.data.prompt_comment ? (
+                 <img 
+@@ -123,4 +123,4 @@ const isBookmarked = readingList.includes(article.slug);
+     </section>
+ 
+ 
+-</Layout>
+\ No newline at end of file
++</Layout>
+diff --git a/src/pages/category/[category].astro b/src/pages/category/[category].astro
+index 79bf126..bf70eb1 100644
+--- a/src/pages/category/[category].astro
++++ b/src/pages/category/[category].astro
+@@ -37,7 +37,7 @@ const featuredArticleImage = featuredArticle ? await getArticleImage(featuredArt
+ const capitalizedCategory = category.charAt(0).toUpperCase() + category.slice(1);
+ ---
+ 
+-<Layout title={`Category: ${capitalizedCategory}`}>
++<Layout title={`Category: ${capitalizedCategory}`} transitionContentId="category-lead-ready">
+     <div class="pb-8">
+         <!-- Dynamic Category Header -->
+         <header class="relative h-64 rounded-b-lg overflow-hidden m-6 mt-0 bg-gray-800">
+@@ -86,6 +86,9 @@ const capitalizedCategory = category.charAt(0).toUpperCase() + category.slice(1)
+                 </section>
+             )}
+ 
++            <!-- This marker also exists if no featured article is available. -->
++            <span id="category-lead-ready" hidden></span>
++
+             <!-- Other Articles -->
+             {otherArticles.length > 0 ? (
+                 <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+diff --git a/src/pages/index.astro b/src/pages/index.astro
+index 92f6399..ada09bf 100644
+--- a/src/pages/index.astro
++++ b/src/pages/index.astro
+@@ -37,7 +37,7 @@ politicsArticles[2] = {
+   };
+ ---
+ 
+-<Layout title="The DevTools Times">
++<Layout title="The DevTools Times" transitionContentId="home-lead">
+     <!-- Top Stories Bar -->
+     <div class="bg-white border-b border-gray-300">
+         <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+@@ -55,9 +55,9 @@ politicsArticles[2] = {
+     </div>
+ 
+     <!-- Main Content Area -->
+-    <main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-6 mt-6">
++    <section id="home-lead" class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-6 mt-6">
+         <ArticleTeaser article={topArticle} large={true} />
+-    </main>
++    </section>
+ 
+     <div class="divide-y divide-gray-200 max-w-6xl mx-auto">
+         <section class="p-4 md:p-6 text-center">
+@@ -81,4 +81,4 @@ politicsArticles[2] = {
+         <TopStoryTeaserGrid title="Politics" articles={politicsArticles} />
+         
+     </div>
+-</Layout>
+\ No newline at end of file
++</Layout>
+diff --git a/src/styles/global.css b/src/styles/global.css
+index e9a9abb..f1198bf 100644
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -1,7 +1,24 @@
+ @import "tailwindcss";
+ 
++/* Native same-origin navigation; unsupported browsers keep normal navigation. */
++@view-transition {
++  navigation: auto;
++}
++
++::view-transition-old(root),
++::view-transition-new(root) {
++  animation-duration: 200ms;
++  animation-timing-function: ease-in-out;
++}
++
++@media (prefers-reduced-motion: reduce) {
++  @view-transition {
++    navigation: none;
++  }
++}
++
+ .font-brand {
+   font-family: "Grenze", serif;
+   font-weight: 500;
+   font-style: normal;
+-}
+\ No newline at end of file
++}

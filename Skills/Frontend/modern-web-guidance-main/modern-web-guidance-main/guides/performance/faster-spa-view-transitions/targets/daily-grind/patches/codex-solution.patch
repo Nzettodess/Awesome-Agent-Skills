@@ -1,0 +1,200 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..849ddff
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++dist/
+diff --git a/build.mjs b/build.mjs
+new file mode 100644
+index 0000000..0b98e5d
+--- /dev/null
++++ b/build.mjs
+@@ -0,0 +1,6 @@
++import { mkdir, copyFile } from 'node:fs/promises';
++import { execFileSync } from 'node:child_process';
++
++execFileSync(process.execPath, ['--check', 'navigation.js'], { stdio: 'inherit' });
++await mkdir('dist', { recursive: true });
++await Promise.all(['index.html', 'navigation.js'].map(file => copyFile(file, `dist/${file}`)));
+diff --git a/index.html b/index.html
+index 66c9173..bd0d093 100644
+--- a/index.html
++++ b/index.html
+@@ -152,29 +152,54 @@
+       text-decoration: none;
+       font-size: 0.85rem;
+     }
++
++    .views { position: relative; }
++    .spa-view.inactive {
++      content-visibility: hidden;
++      position: absolute;
++      inset: 0;
++      height: 0;
++      overflow: hidden;
++      pointer-events: none;
++    }
++    @supports not (content-visibility: hidden) {
++      .spa-view.inactive { display: none; }
++    }
++    .spa-view:focus { outline: none; }
++    nav a[aria-current="page"] { color: var(--accent); text-decoration: underline; }
++    .logo a { font: inherit; letter-spacing: inherit; }
++    label { display: block; margin-top: 1rem; }
++    input { padding: 0.6rem; max-width: 100%; font: inherit; }
++    @media (max-width: 650px) {
++      nav { flex-wrap: wrap; gap: 1rem; }
++      nav ul { flex-wrap: wrap; gap: 0.75rem; }
++      nav ul li { margin-left: 0; }
++    }
+   </style>
+ </head>
+ 
+ <body>
+ 
+   <nav>
+-    <div class="logo">THE DAILY GRIND</div>
++    <div class="logo"><a href="#/">THE DAILY GRIND</a></div>
+     <ul>
+-      <li><a href="/menu">Menu</a></li>
+-      <li><a href="/locations">Locations</a></li>
+-      <li><a href="/rewards">Rewards</a></li>
+-      <li><a href="/account">My Account</a></li>
++      <li><a href="#/menu">Menu</a></li>
++      <li><a href="#/locations">Locations</a></li>
++      <li><a href="#/rewards">Rewards</a></li>
++      <li><a href="#/account">My Account</a></li>
+       <li><a href="/logout" class="logout-link">Logout</a></li>
+     </ul>
+   </nav>
+ 
++  <main class="views">
++  <section id="home-view" class="spa-view" data-route="/" tabindex="-1" aria-label="Home">
+   <header class="hero">
+     <h1>Wake Up Your Senses</h1>
+     <p>Ethically sourced, locally roasted, delivered to your cup.</p>
+     <a href="/order-online" class="btn">Order Now</a>
+   </header>
+ 
+-  <main class="container">
++  <div class="container">
+     <section>
+       <h2 style="text-align: center;">Seasonal Favorites</h2>
+       <div class="grid">
+@@ -195,6 +220,47 @@
+         </div>
+       </div>
+     </section>
++  </div>
++  </section>
++
++  <section id="menu-view" class="spa-view inactive" data-route="/menu" tabindex="-1" aria-labelledby="menu-title" aria-hidden="true" inert>
++    <div class="container">
++      <h1 id="menu-title">Menu</h1>
++      <p>Find your next favorite cup.</p>
++      <div class="grid">
++        <article class="card"><h2>Maple Oat Latte</h2><p>Creamy oat milk with a hint of Vermont maple syrup.</p></article>
++        <article class="card"><h2>Dark Roast Espresso</h2><p>Bold, smokey, and perfect for a morning boost.</p></article>
++        <article class="card"><h2>Cold Brew</h2><p>Steeped for 18 hours for maximum smoothness.</p></article>
++      </div>
++    </div>
++  </section>
++
++  <section id="locations-view" class="spa-view inactive" data-route="/locations" tabindex="-1" aria-labelledby="locations-title" aria-hidden="true" inert>
++    <div class="container">
++      <h1 id="locations-title">Locations</h1>
++      <p>Make The Daily Grind part of your neighborhood routine.</p>
++      <p>For current locations and opening hours, <a href="/contact">contact our team</a>.</p>
++    </div>
++  </section>
++
++  <section id="rewards-view" class="spa-view inactive" data-route="/rewards" tabindex="-1" aria-labelledby="rewards-title" aria-hidden="true" inert>
++    <div class="container">
++      <h1 id="rewards-title">Rewards</h1>
++      <p>A little something extra for your daily coffee ritual.</p>
++      <a class="btn" href="#/account">Go to My Account</a>
++      <details><summary>How do I learn more about rewards?</summary><p>Contact our team for membership details and available offers.</p></details>
++    </div>
++  </section>
++
++  <section id="account-view" class="spa-view inactive" data-route="/account" tabindex="-1" aria-labelledby="account-title" aria-hidden="true" inert>
++    <div class="container">
++      <h1 id="account-title">My Account</h1>
++      <p>Plan your next coffee break. Your notes stay here while you explore the site.</p>
++      <label for="coffee-note">My usual order</label>
++      <input id="coffee-note" name="coffee-note" type="text" placeholder="Your favorite coffee">
++      <p>For help with your account, <a href="/contact">contact our team</a>.</p>
++    </div>
++  </section>
+   </main>
+ 
+   <footer>
+@@ -207,6 +273,7 @@
+     <p>&copy; 2026 The Daily Grind Coffee Co. All rights reserved.</p>
+   </footer>
+ 
++  <script type="module" src="./navigation.js"></script>
+ </body>
+ 
+ </html>
+diff --git a/navigation.js b/navigation.js
+new file mode 100644
+index 0000000..3f40760
+--- /dev/null
++++ b/navigation.js
+@@ -0,0 +1,42 @@
++// @ts-check
++
++const views = Array.from(document.querySelectorAll('.spa-view'));
++const links = Array.from(document.querySelectorAll('nav a'));
++const titles = new Map([
++  ['/', 'Artisanal Coffee'],
++  ['/menu', 'Menu'],
++  ['/locations', 'Locations'],
++  ['/rewards', 'Rewards'],
++  ['/account', 'My Account'],
++]);
++
++function showView() {
++  const route = window.location.hash.slice(1) || '/';
++  const target = views.find(view => view instanceof HTMLElement && view.dataset.route === route);
++  if (!(target instanceof HTMLElement)) {
++    window.location.replace('#/');
++    return;
++  }
++
++  // Keep this bounded set of five views mounted, including their input and UI state.
++  for (const view of views) {
++    if (!(view instanceof HTMLElement)) continue;
++    const inactive = view !== target;
++    view.classList.toggle('inactive', inactive);
++    view.inert = inactive;
++    view.setAttribute('aria-hidden', String(inactive));
++  }
++  for (const link of links) {
++    if (link.getAttribute('href') === `#${route}`) {
++      link.setAttribute('aria-current', 'page');
++    } else {
++      link.removeAttribute('aria-current');
++    }
++  }
++  document.title = `The Daily Grind | ${titles.get(route) || 'Artisanal Coffee'}`;
++  target.focus({ preventScroll: true });
++  window.scrollTo(0, 0);
++}
++
++window.addEventListener('hashchange', showView);
++showView();
+diff --git a/package.json b/package.json
+index 2bd4d77..5c14ac8 100644
+--- a/package.json
++++ b/package.json
+@@ -2,6 +2,7 @@
+   "name": "daily-grind",
+   "version": "1.0.0",
+   "scripts": {
++    "build": "node build.mjs",
+     "start": "pnpm dlx statikk --port ${PORT:-11222}"
+   },
+   "pnpm": {

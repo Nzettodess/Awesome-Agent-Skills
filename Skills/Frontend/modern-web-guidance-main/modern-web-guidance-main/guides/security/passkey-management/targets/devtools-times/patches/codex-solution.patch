@@ -1,0 +1,734 @@
+diff --git a/.gitignore b/.gitignore
+index c2b8e14..d69637c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -23,4 +23,7 @@ pnpm-debug.log*
+ # jetbrains setting folder
+ .idea/
+ 
+-db.file
+\ No newline at end of file
++# Local account database
++.data/
++
++db.file
+diff --git a/README.md b/README.md
+index 4479b53..dcbb3d2 100644
+--- a/README.md
++++ b/README.md
+@@ -15,3 +15,20 @@ The application will now be running on `http://localhost:11224`.
+ - **[React](https://react.dev/)**: Used for UI components.
+ - **[Tailwind CSS](https://tailwindcss.com/)**: For styling the application.
+ - **[Astro DB](https://docs.astro.build/en/guides/database/)**: Powers the comments feature, using a libSQL-compatible database.
++# Account settings and passkeys
++
++Sign up, sign in, then open Account settings from the header. Accounts, password hashes,
++sessions, WebAuthn challenges, and credentials are stored in SQLite. Passkey sign-in
++updates the stored last-used timestamp and signature counter after verification.
++
++Requires Node.js 22.13 or newer with `node:sqlite`. Set `ACCOUNT_DB_PATH` to a writable
++SQLite file on a persistent volume (default: `.data/accounts.sqlite`). Instances must
++share the same database; use a database service before deploying across hosts.
++Set `WEBAUTHN_ORIGIN` to the canonical HTTPS origin in production; its hostname is the
++RP ID. Localhost can use HTTP. Existing external-service accounts must register locally;
++this application has no access to the external service's account database.
++
++Provider labels and icons use a local subset of the community AAGUID registry;
++unknown or zero AAGUIDs use a generic key icon. Unsupported Signal APIs are skipped.
++If synchronization fails, server changes remain saved and the page shows a warning.
++
+diff --git a/package.json b/package.json
+index bfffcf0..ad20a5d 100644
+--- a/package.json
++++ b/package.json
+@@ -5,7 +5,7 @@
+   "scripts": {
+     "dev": "astro dev",
+     "start": "HOST=0.0.0.0 PORT=${PORT:-11224} node ./dist/server/entry.mjs",
+-    "build": "astro build",
++    "build": "tsc --project tsconfig.passkeys.json && astro build",
+     "preview": "astro preview",
+     "astro": "astro"
+   },
+@@ -13,6 +13,7 @@
+     "@astrojs/node": "^11.1.9",
+     "@astrojs/react": "^5.0.7",
+     "@heroicons/react": "^2.2.0",
++    "@simplewebauthn/server": "^14.0.3",
+     "@tailwindcss/vite": "^4.3.3",
+     "@types/react": "^19.3.0",
+     "@types/react-dom": "^19.3.0",
+@@ -20,10 +21,13 @@
+     "react": "^19.3.1",
+     "react-dom": "^19.3.1",
+     "sharp": "^0.35.5",
+-    "tailwindcss": "^4.3.3"
++    "tailwindcss": "^4.3.3",
++    "webauthn-polyfills": "^0.1.7"
+   },
+   "devDependencies": {
+-    "@tailwindcss/typography": "^0.5.20"
++    "@tailwindcss/typography": "^0.5.20",
++    "@types/node": "^26.6.6",
++    "typescript": "^7.0.2"
+   },
+   "pnpm": {
+     "onlyBuiltDependencies": [
+diff --git a/src/components/AccountSettings.tsx b/src/components/AccountSettings.tsx
+new file mode 100644
+index 0000000..3a4c586
+--- /dev/null
++++ b/src/components/AccountSettings.tsx
+@@ -0,0 +1,156 @@
++import { useEffect, useState, type FormEvent } from 'react';
++import type { Account, SettingsData, StoredPasskeyCredential } from '../lib/passkey-types';
++import { api, syncAccepted, syncUser } from '../lib/passkey-client';
++import { fallbackIcon, passkeyProvider } from '../lib/passkey-providers';
++
++const inputClass = 'w-full border border-gray-300 rounded-md px-3 py-2';
++const buttonClass = 'rounded-md bg-gray-900 text-white px-4 py-2 text-sm font-semibold disabled:opacity-50';
++const date = (epoch: number) => new Date(epoch).toLocaleDateString(undefined, { dateStyle: 'medium' });
++
++export default function AccountSettings() {
++  const [data, setData] = useState<SettingsData>();
++  const [loading, setLoading] = useState(true);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState('');
++  const [message, setMessage] = useState('');
++  const [syncWarning, setSyncWarning] = useState('');
++  const [canCreate, setCanCreate] = useState(false);
++  const [capabilitiesChecked, setCapabilitiesChecked] = useState(false);
++  const [name, setName] = useState('');
++  const [displayName, setDisplayName] = useState('');
++  const [editing, setEditing] = useState<string>();
++  const [nickname, setNickname] = useState('');
++  const [deleting, setDeleting] = useState<string>();
++
++  async function sync(action: () => Promise<void>) {
++    setSyncWarning('');
++    try { await action(); }
++    catch { setSyncWarning('Your changes are saved. Your password manager could not be synchronized; reload this page to retry passkey synchronization.'); }
++  }
++
++  useEffect(() => {
++    let active = true;
++    async function load() {
++      try {
++        const settings = await api<SettingsData>('account/settings');
++        if (!active) return;
++        setData(settings); setName(settings.user.name); setDisplayName(settings.user.displayName);
++        await sync(() => syncAccepted(settings.rpId, settings.user.id, settings.credentials));
++      } catch (e) { if (active) setError(e instanceof Error ? e.message : 'Could not load settings.'); }
++      finally { if (active) setLoading(false); }
++    }
++    async function detect() {
++      try {
++        await import('webauthn-polyfills');
++        if (!window.PublicKeyCredential || !window.isSecureContext) return;
++        const capabilities = await PublicKeyCredential.getClientCapabilities();
++        if (active) setCanCreate(capabilities.userVerifyingPlatformAuthenticator === true);
++      } catch { /* Keep registration hidden when capabilities cannot be established. */ }
++      finally { if (active) setCapabilitiesChecked(true); }
++    }
++    void load(); void detect();
++    return () => { active = false; };
++  }, []);
++
++  async function run(action: () => Promise<void>) {
++    setBusy(true); setError(''); setMessage('');
++    try { await action(); }
++    catch (e) { setError(e instanceof Error ? e.message : 'The request failed.'); }
++    finally { setBusy(false); }
++  }
++
++  async function updateProfile(event: FormEvent) {
++    event.preventDefault();
++    if (!data) return;
++    await run(async () => {
++      const user = await api<Account>('user', 'PUT', { name, displayName });
++      setData({ ...data, user }); setName(user.name); setDisplayName(user.displayName);
++      await sync(() => syncUser(data.rpId, user));
++      setMessage('Account details saved.');
++    });
++  }
++  async function rename(event: FormEvent, id: string) {
++    event.preventDefault();
++    if (!data) return;
++    await run(async () => {
++      const credential = await api<StoredPasskeyCredential>(`credential/${encodeURIComponent(id)}`, 'PUT', { name: nickname });
++      setData({ ...data, credentials: data.credentials.map(c => c.id === id ? credential : c) });
++      setEditing(undefined); setMessage('Passkey name saved.');
++    });
++  }
++  async function remove(id: string) {
++    if (!data) return;
++    await run(async () => {
++      const result = await api<{ credentials: StoredPasskeyCredential[] }>(`credential/${encodeURIComponent(id)}`, 'DELETE');
++      setData({ ...data, credentials: result.credentials }); setDeleting(undefined);
++      await sync(() => syncAccepted(data.rpId, data.user.id, result.credentials));
++      setMessage('Passkey removed. You can still sign in with your password.');
++    });
++  }
++  async function create() {
++    if (!data) return;
++    await run(async () => {
++      const options = await api<PublicKeyCredentialCreationOptionsJSON>('account/registration/options', 'POST', {});
++      const credential = await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options) }) as PublicKeyCredential | null;
++      if (!credential) throw new Error('Passkey creation was cancelled.');
++      await api('account/registration/verify', 'POST', credential.toJSON());
++      const credentials = await api<StoredPasskeyCredential[]>('credentials');
++      setData({ ...data, credentials });
++      await sync(() => syncAccepted(data.rpId, data.user.id, credentials));
++      setMessage('Passkey created.');
++    });
++  }
++
++  if (loading) return <p role="status">Loading account settings…</p>;
++  if (!data) return <div><p role="alert">{error}</p><a className="underline" href={`${import.meta.env.BASE_URL}signin`}>Sign in</a><button className="ml-4 underline" onClick={() => window.location.reload()}>Retry</button></div>;
++  return <div className="space-y-8">
++    {error && <p role="alert" className="p-3 bg-red-50 text-red-800 rounded">{error}</p>}
++    {message && <p role="status" className="p-3 bg-green-50 text-green-800 rounded">{message}</p>}
++    {syncWarning && <div className="p-3 bg-amber-50 text-amber-900 rounded"><p role="status">{syncWarning}</p><button disabled={busy} className="text-sm underline mt-2" onClick={() => run(() => sync(async () => { await syncAccepted(data.rpId, data.user.id, data.credentials); await syncUser(data.rpId, data.user); }))}>Retry synchronization</button></div>}
++    <section aria-labelledby="profile-title" className="border border-gray-200 rounded-lg p-6">
++      <h2 id="profile-title" className="text-xl font-bold mb-4">Account details</h2>
++      <form onSubmit={updateProfile} className="space-y-4">
++        <div><label htmlFor="account-name" className="block mb-1">Username</label><input className={inputClass} id="account-name" autoComplete="username" value={name} onChange={e => setName(e.target.value)} required maxLength={100} disabled={busy} /></div>
++        <div><label htmlFor="account-display-name" className="block mb-1">Display name</label><input className={inputClass} id="account-display-name" autoComplete="nickname" value={displayName} onChange={e => setDisplayName(e.target.value)} required maxLength={100} disabled={busy} /></div>
++        <button className={buttonClass} disabled={busy}>Save account details</button>
++      </form>
++    </section>
++    <section aria-labelledby="passkeys-title" className="border border-gray-200 rounded-lg p-6">
++      <h2 id="passkeys-title" className="text-xl font-bold">Passkeys</h2>
++      <p className="text-sm text-gray-600 mt-2 mb-4">Sign in securely with your fingerprint, face, device PIN, or a security key. Give each passkey a name you recognize.</p>
++      {canCreate && <button onClick={create} disabled={busy} className={buttonClass}>{busy ? 'Please wait…' : 'Create passkey'}</button>}
++      {capabilitiesChecked && !canCreate && <p className="text-sm text-gray-600">Passkey creation is unavailable in this browser. Use a supported browser on a secure connection, or enroll in standard multi-factor authentication through your account provider.</p>}
++      {!data.credentials.length ? <p className="mt-6 text-gray-600">No passkeys found. Your password is still available for sign-in.</p> : <ul className="mt-6 divide-y divide-gray-200">
++        {data.credentials.map(credential => {
++          const provider = passkeyProvider(credential.aaguid);
++          const label = credential.name || provider.name;
++          return <li key={credential.id} className="py-5">
++            <div className="flex gap-3 items-start">
++              <img src={provider.icon || fallbackIcon} width={40} height={40} alt={`${provider.name} icon`} className="shrink-0" />
++              <div className="min-w-0 flex-1">
++                <h3 className="font-semibold break-words">{label}</h3>
++                {credential.name && <p className="text-sm text-gray-500">{provider.name}</p>}
++                <p className="text-sm text-gray-600">Registered <time dateTime={new Date(credential.registeredAt).toISOString()}>{date(credential.registeredAt)}</time></p>
++                <p className="text-sm text-gray-600">Last used: {credential.lastUsedAt ? <time dateTime={new Date(credential.lastUsedAt).toISOString()}>{date(credential.lastUsedAt)}</time> : 'Never'}</p>
++                <div className="flex gap-4 mt-3">
++                  <button className="text-sm underline" disabled={busy} aria-label={`Rename ${label}`} onClick={() => { setEditing(credential.id); setNickname(label); setDeleting(undefined); }}>Rename</button>
++                  <button className="text-sm underline text-red-700" disabled={busy} aria-label={`Delete ${label}`} onClick={() => { setDeleting(credential.id); setEditing(undefined); }}>Delete</button>
++                </div>
++                {editing === credential.id && <form className="mt-3 space-y-2" onSubmit={e => rename(e, credential.id)}>
++                  <label htmlFor="passkey-nickname" className="block text-sm">Passkey name</label>
++                  <input id="passkey-nickname" autoFocus className={inputClass} value={nickname} onChange={e => setNickname(e.target.value)} required maxLength={100} disabled={busy} />
++                  <button className={buttonClass} disabled={busy}>Save name</button><button type="button" className="ml-3 text-sm underline" disabled={busy} onClick={() => setEditing(undefined)}>Cancel</button>
++                </form>}
++                {deleting === credential.id && <div className="mt-3 p-3 bg-red-50 rounded">
++                  <p className="text-sm mb-2">Remove “{label}”? This passkey will no longer sign you in. You can still use your password.</p>
++                  <button className={buttonClass} disabled={busy} onClick={() => remove(credential.id)}>Confirm removal</button><button className="ml-3 text-sm underline" disabled={busy} onClick={() => setDeleting(undefined)}>Cancel</button>
++                </div>}
++              </div>
++            </div>
++          </li>;
++        })}
++      </ul>}
++    </section>
++    <button className="text-sm underline" disabled={busy} onClick={() => run(async () => { await api('account/logout', 'POST', {}); window.location.assign(import.meta.env.BASE_URL); })}>Sign out</button>
++  </div>;
++}
+diff --git a/src/components/Header.astro b/src/components/Header.astro
+index 980b279..8375c26 100644
+--- a/src/components/Header.astro
++++ b/src/components/Header.astro
+@@ -3,6 +3,8 @@ import ReadingListButton from "./ReadingListButton.tsx";
+ import SearchButton from "./SearchButton.tsx";
+ import { getCollection } from "astro:content";
+ import BottomNav from "./BottomNav.tsx";
++import { currentUser } from '../lib/accounts';
++const signedIn = !!currentUser(Astro.cookies);
+ 
+ const articles = await getCollection("articles");
+ const reports = await getCollection("reports");
+@@ -25,6 +27,7 @@ const todaysDate = new Date().toLocaleDateString('en-US', { weekday: 'long', yea
+ 
+       <!-- Right: Buttons -->
+       <div class="flex items-center space-x-3">
++        {signedIn ? <a href={`${baseUrl}settings`} data-skip-tracking="true" class="bg-gray-800 text-white text-xs font-semibold py-2 px-3 rounded whitespace-nowrap hover:bg-gray-700">Account settings</a> : <>
+         <a
+           href={`${baseUrl}signup`}
+           data-skip-tracking="true"
+@@ -39,6 +42,7 @@ const todaysDate = new Date().toLocaleDateString('en-US', { weekday: 'long', yea
+         >
+           Sign in
+         </a>
++        </>}
+       </div>
+     </div>
+   </div>
+diff --git a/src/components/SignInForm.tsx b/src/components/SignInForm.tsx
+index a7c52b6..6c37638 100644
+--- a/src/components/SignInForm.tsx
++++ b/src/components/SignInForm.tsx
+@@ -1,4 +1,5 @@
+ import React, { useState } from 'react';
++import { api } from '../lib/passkey-client';
+ 
+ export default function SignInForm() {
+   const [username, setUsername] = useState('');
+@@ -14,7 +15,7 @@ export default function SignInForm() {
+     setLoading(true);
+ 
+     try {
+-      const response = await fetch('https://us-central1-web-devrel-apps.cloudfunctions.net/times_cdn/api/login', {
++      const response = await fetch(`${import.meta.env.BASE_URL}api/account/login`, {
+         method: 'POST',
+         headers: {
+           'Content-Type': 'application/json',
+@@ -29,8 +30,7 @@ export default function SignInForm() {
+         // For now, we display a generic error message including the code.
+         setError(`Login failed: ${data.error || 'Unknown error'}`);
+       } else {
+-        setSuccess('Login successful!');
+-        // You might store the token here if needed, e.g., localStorage.setItem('token', data.token);
++        window.location.assign(`${import.meta.env.BASE_URL}settings`);
+       }
+     } catch (err) {
+       setError('An unexpected error occurred. Please try again later.');
+@@ -39,6 +39,20 @@ export default function SignInForm() {
+     }
+   };
+ 
++  const signInWithPasskey = async () => {
++    setError(null); setLoading(true);
++    try {
++      await import('webauthn-polyfills');
++      if (!window.PublicKeyCredential) throw new Error('Passkeys are unavailable in this browser. Sign in with your password.');
++      const options = await api<PublicKeyCredentialRequestOptionsJSON>('account/authentication/options', 'POST', { username });
++      const credential = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) }) as PublicKeyCredential | null;
++      if (!credential) throw new Error('Passkey sign-in was cancelled.');
++      await api('account/authentication/verify', 'POST', credential.toJSON());
++      window.location.assign(`${import.meta.env.BASE_URL}settings`);
++    } catch (e) { setError(e instanceof Error ? e.message : 'Passkey sign-in failed.'); }
++    finally { setLoading(false); }
++  };
++
+   return (
+     <div className="max-w-md mx-auto mt-10 p-6 bg-white border border-gray-200 rounded-lg shadow-sm">
+       <h2 className="text-2xl font-bold mb-6 text-center text-gray-800">Sign In</h2>
+@@ -94,6 +108,8 @@ export default function SignInForm() {
+           {loading ? 'Signing in...' : 'Sign In'}
+         </button>
+       </form>
++      <button type="button" disabled={loading || !username.trim()} onClick={signInWithPasskey} className="w-full mt-4 py-2 border border-gray-300 rounded-md text-sm disabled:opacity-50">Sign in with a passkey</button>
++      <p className="mt-2 text-xs text-gray-500">Enter your username to use a registered passkey.</p>
+     </div>
+   );
+ }
+diff --git a/src/components/SignUpForm.tsx b/src/components/SignUpForm.tsx
+index 589fe62..da0a1c6 100644
+--- a/src/components/SignUpForm.tsx
++++ b/src/components/SignUpForm.tsx
+@@ -14,7 +14,7 @@ export default function SignUpForm() {
+     setLoading(true);
+ 
+     try {
+-      const response = await fetch('https://us-central1-web-devrel-apps.cloudfunctions.net/times_cdn/api/register', {
++      const response = await fetch(`${import.meta.env.BASE_URL}api/account/register`, {
+         method: 'POST',
+         headers: {
+           'Content-Type': 'application/json',
+@@ -84,7 +84,7 @@ export default function SignUpForm() {
+             className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+           />
+           <p className="text-xs text-gray-500 mt-1">
+-             Must be at least 8 characters and contain a number.
++             Must be between 8 and 256 characters.
+           </p>
+         </div>
+ 
+diff --git a/src/lib/aaguids.json b/src/lib/aaguids.json
+new file mode 100644
+index 0000000..466c8ba
+--- /dev/null
++++ b/src/lib/aaguids.json
+@@ -0,0 +1,47 @@
++{
++  "08987058-cadc-4b81-b6e1-30de50dcbe96": {
++    "name": "Windows Hello",
++    "icon_dark": "data:image/svg+xml;base64,PHN2ZyBpZD0iTGF5ZXJfMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMDc4ZDQ7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIyNC4yNSIgeT0iMjQuMjUiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjxyZWN0IGNsYXNzPSJjbHMtMSIgeD0iMTMzLjQiIHk9IjI0LjI1IiB3aWR0aD0iOTguMzUiIGhlaWdodD0iOTguMzUiLz48cmVjdCBjbGFzcz0iY2xzLTEiIHg9IjI0LjI1IiB5PSIxMzMuNCIgd2lkdGg9Ijk4LjM1IiBoZWlnaHQ9Ijk4LjM1Ii8+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIxMzMuNCIgeT0iMTMzLjQiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjwvc3ZnPg==",
++    "icon_light": "data:image/svg+xml;base64,PHN2ZyBpZD0iTGF5ZXJfMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMDc4ZDQ7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIyNC4yNSIgeT0iMjQuMjUiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjxyZWN0IGNsYXNzPSJjbHMtMSIgeD0iMTMzLjQiIHk9IjI0LjI1IiB3aWR0aD0iOTguMzUiIGhlaWdodD0iOTguMzUiLz48cmVjdCBjbGFzcz0iY2xzLTEiIHg9IjI0LjI1IiB5PSIxMzMuNCIgd2lkdGg9Ijk4LjM1IiBoZWlnaHQ9Ijk4LjM1Ii8+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIxMzMuNCIgeT0iMTMzLjQiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjwvc3ZnPg=="
++  },
++  "9ddd1817-af5a-4672-a2b9-3e3dd95000a9": {
++    "name": "Windows Hello",
++    "icon_dark": "data:image/svg+xml;base64,PHN2ZyBpZD0iTGF5ZXJfMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMDc4ZDQ7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIyNC4yNSIgeT0iMjQuMjUiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjxyZWN0IGNsYXNzPSJjbHMtMSIgeD0iMTMzLjQiIHk9IjI0LjI1IiB3aWR0aD0iOTguMzUiIGhlaWdodD0iOTguMzUiLz48cmVjdCBjbGFzcz0iY2xzLTEiIHg9IjI0LjI1IiB5PSIxMzMuNCIgd2lkdGg9Ijk4LjM1IiBoZWlnaHQ9Ijk4LjM1Ii8+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIxMzMuNCIgeT0iMTMzLjQiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjwvc3ZnPg==",
++    "icon_light": "data:image/svg+xml;base64,PHN2ZyBpZD0iTGF5ZXJfMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMDc4ZDQ7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIyNC4yNSIgeT0iMjQuMjUiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjxyZWN0IGNsYXNzPSJjbHMtMSIgeD0iMTMzLjQiIHk9IjI0LjI1IiB3aWR0aD0iOTguMzUiIGhlaWdodD0iOTguMzUiLz48cmVjdCBjbGFzcz0iY2xzLTEiIHg9IjI0LjI1IiB5PSIxMzMuNCIgd2lkdGg9Ijk4LjM1IiBoZWlnaHQ9Ijk4LjM1Ii8+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIxMzMuNCIgeT0iMTMzLjQiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjwvc3ZnPg=="
++  },
++  "6028b017-b1d4-4c02-b4b3-afcdafc96bb2": {
++    "name": "Windows Hello",
++    "icon_dark": "data:image/svg+xml;base64,PHN2ZyBpZD0iTGF5ZXJfMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMDc4ZDQ7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIyNC4yNSIgeT0iMjQuMjUiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjxyZWN0IGNsYXNzPSJjbHMtMSIgeD0iMTMzLjQiIHk9IjI0LjI1IiB3aWR0aD0iOTguMzUiIGhlaWdodD0iOTguMzUiLz48cmVjdCBjbGFzcz0iY2xzLTEiIHg9IjI0LjI1IiB5PSIxMzMuNCIgd2lkdGg9Ijk4LjM1IiBoZWlnaHQ9Ijk4LjM1Ii8+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIxMzMuNCIgeT0iMTMzLjQiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjwvc3ZnPg==",
++    "icon_light": "data:image/svg+xml;base64,PHN2ZyBpZD0iTGF5ZXJfMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMDc4ZDQ7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIyNC4yNSIgeT0iMjQuMjUiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjxyZWN0IGNsYXNzPSJjbHMtMSIgeD0iMTMzLjQiIHk9IjI0LjI1IiB3aWR0aD0iOTguMzUiIGhlaWdodD0iOTguMzUiLz48cmVjdCBjbGFzcz0iY2xzLTEiIHg9IjI0LjI1IiB5PSIxMzMuNCIgd2lkdGg9Ijk4LjM1IiBoZWlnaHQ9Ijk4LjM1Ii8+PHJlY3QgY2xhc3M9ImNscy0xIiB4PSIxMzMuNCIgeT0iMTMzLjQiIHdpZHRoPSI5OC4zNSIgaGVpZ2h0PSI5OC4zNSIvPjwvc3ZnPg=="
++  },
++  "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4": {
++    "name": "Google Password Manager",
++    "icon_dark": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGVuYWJsZS1iYWNrZ3JvdW5kPSJuZXcgMCAwIDE5MiAxOTIiIGhlaWdodD0iMjRweCIgdmlld0JveD0iMCAwIDE5MiAxOTIiIHdpZHRoPSIyNHB4Ij48cmVjdCBmaWxsPSJub25lIiBoZWlnaHQ9IjE5MiIgd2lkdGg9IjE5MiIgeT0iMCIvPjxnPjxwYXRoIGQ9Ik02OS4yOSwxMDZjLTMuNDYsNS45Ny05LjkxLDEwLTE3LjI5LDEwYy0xMS4wMywwLTIwLTguOTctMjAtMjBzOC45Ny0yMCwyMC0yMCBjNy4zOCwwLDEzLjgzLDQuMDMsMTcuMjksMTBoMjUuNTVDOTAuMyw2Ni41NCw3Mi44Miw1Miw1Miw1MkMyNy43NCw1Miw4LDcxLjc0LDgsOTZzMTkuNzQsNDQsNDQsNDRjMjAuODIsMCwzOC4zLTE0LjU0LDQyLjg0LTM0IEg2OS4yOXoiIGZpbGw9IiM0Mjg1RjQiLz48cmVjdCBmaWxsPSIjRkJCQzA0IiBoZWlnaHQ9IjI0IiB3aWR0aD0iNDQiIHg9Ijk0IiB5PSI4NCIvPjxwYXRoIGQ9Ik05NC4zMiw4NEg2OHYwLjA1YzIuNSwzLjM0LDQsNy40Nyw0LDExLjk1cy0xLjUsOC42MS00LDExLjk1VjEwOGgyNi4zMiBjMS4wOC0zLjgyLDEuNjgtNy44NCwxLjY4LTEyUzk1LjQxLDg3LjgyLDk0LjMyLDg0eiIgZmlsbD0iI0VBNDMzNSIvPjxwYXRoIGQ9Ik0xODQsMTA2djI2aC0xNnYtOGMwLTQuNDItMy41OC04LTgtOHMtOCwzLjU4LTgsOHY4aC0xNnYtMjZIMTg0eiIgZmlsbD0iIzM0QTg1MyIvPjxyZWN0IGZpbGw9IiMxODgwMzgiIGhlaWdodD0iMjQiIHdpZHRoPSI0OCIgeD0iMTM2IiB5PSI4NCIvPjwvZz48L3N2Zz4=",
++    "icon_light": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGVuYWJsZS1iYWNrZ3JvdW5kPSJuZXcgMCAwIDE5MiAxOTIiIGhlaWdodD0iMjRweCIgdmlld0JveD0iMCAwIDE5MiAxOTIiIHdpZHRoPSIyNHB4Ij48cmVjdCBmaWxsPSJub25lIiBoZWlnaHQ9IjE5MiIgd2lkdGg9IjE5MiIgeT0iMCIvPjxnPjxwYXRoIGQ9Ik02OS4yOSwxMDZjLTMuNDYsNS45Ny05LjkxLDEwLTE3LjI5LDEwYy0xMS4wMywwLTIwLTguOTctMjAtMjBzOC45Ny0yMCwyMC0yMCBjNy4zOCwwLDEzLjgzLDQuMDMsMTcuMjksMTBoMjUuNTVDOTAuMyw2Ni41NCw3Mi44Miw1Miw1Miw1MkMyNy43NCw1Miw4LDcxLjc0LDgsOTZzMTkuNzQsNDQsNDQsNDRjMjAuODIsMCwzOC4zLTE0LjU0LDQyLjg0LTM0IEg2OS4yOXoiIGZpbGw9IiM0Mjg1RjQiLz48cmVjdCBmaWxsPSIjRkJCQzA0IiBoZWlnaHQ9IjI0IiB3aWR0aD0iNDQiIHg9Ijk0IiB5PSI4NCIvPjxwYXRoIGQ9Ik05NC4zMiw4NEg2OHYwLjA1YzIuNSwzLjM0LDQsNy40Nyw0LDExLjk1cy0xLjUsOC42MS00LDExLjk1VjEwOGgyNi4zMiBjMS4wOC0zLjgyLDEuNjgtNy44NCwxLjY4LTEyUzk1LjQxLDg3LjgyLDk0LjMyLDg0eiIgZmlsbD0iI0VBNDMzNSIvPjxwYXRoIGQ9Ik0xODQsMTA2djI2aC0xNnYtOGMwLTQuNDItMy41OC04LTgtOHMtOCwzLjU4LTgsOHY4aC0xNnYtMjZIMTg0eiIgZmlsbD0iIzM0QTg1MyIvPjxyZWN0IGZpbGw9IiMxODgwMzgiIGhlaWdodD0iMjQiIHdpZHRoPSI0OCIgeD0iMTM2IiB5PSI4NCIvPjwvZz48L3N2Zz4="
++  },
++  "dd4ec289-e01d-41c9-bb89-70fa845d4bf2": {
++    "name": "iCloud Keychain (Managed)",
++    "icon_dark": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJub25lIj48cGF0aCBkPSJtMjE3LjM2LDkwLjY5Yy0xNS41OCw5LjU0LTI1LjE3LDI2LjQxLTI1LjM4LDQ0LjY4LjA2LDIwLjY3LDEyLjQzLDM5LjMyLDMxLjQ2LDQ3LjQxLTMuNjcsMTEuODQtOS4xLDIzLjA2LTE2LjExLDMzLjI4LTEwLjAzLDE0LjQ0LTIwLjUyLDI4Ljg3LTM2LjQ3LDI4Ljg3cy0yMC4wNi05LjI3LTM4LjQ1LTkuMjctMjQuMzIsOS41Ny0zOC45LDkuNTctMjQuNzctMTMuMzctMzYuNDctMjkuNzljLTE1LjQ2LTIyLjk5LTIzLjk1LTQ5Ljk2LTI0LjQ3LTc3LjY2LDAtNDUuNTksMjkuNjMtNjkuNzUsNTguODEtNjkuNzUsMTUuNSwwLDI4LjQyLDEwLjE4LDM4LjE1LDEwLjE4czIzLjcxLTEwLjc5LDQxLjM0LTEwLjc5YzE4LjQxLS40NywzNS44NCw4LjI0LDQ2LjUsMjMuMjVabS01NC44Ni00Mi41NWM3Ljc3LTkuMTQsMTIuMTctMjAuNjcsMTIuNDYtMzIuNjcuMDEtMS41OC0uMTQtMy4xNi0uNDYtNC43MS0xMy4zNSwxLjMtMjUuNjksNy42Ny0zNC41LDE3Ljc4LTcuODUsOC43OC0xMi40MSwyMC0xMi45MiwzMS43NiwwLDEuNDMuMTYsMi44Ni40Niw0LjI2LDEuMDUuMiwyLjEyLjMsMy4xOS4zLDEyLjQzLS45OSwyMy45MS03LjA0LDMxLjc2LTE2LjczWiIgZmlsbD0iI0ZGRiIvPjwvc3ZnPg==",
++    "icon_light": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJub25lIj48cGF0aCBkPSJtMjE3LjM2LDkwLjY5Yy0xNS41OCw5LjU0LTI1LjE3LDI2LjQxLTI1LjM4LDQ0LjY4LjA2LDIwLjY3LDEyLjQzLDM5LjMyLDMxLjQ2LDQ3LjQxLTMuNjcsMTEuODQtOS4xLDIzLjA2LTE2LjExLDMzLjI4LTEwLjAzLDE0LjQ0LTIwLjUyLDI4Ljg3LTM2LjQ3LDI4Ljg3cy0yMC4wNi05LjI3LTM4LjQ1LTkuMjctMjQuMzIsOS41Ny0zOC45LDkuNTctMjQuNzctMTMuMzctMzYuNDctMjkuNzljLTE1LjQ2LTIyLjk5LTIzLjk1LTQ5Ljk2LTI0LjQ3LTc3LjY2LDAtNDUuNTksMjkuNjMtNjkuNzUsNTguODEtNjkuNzUsMTUuNSwwLDI4LjQyLDEwLjE4LDM4LjE1LDEwLjE4czIzLjcxLTEwLjc5LDQxLjM0LTEwLjc5YzE4LjQxLS40NywzNS44NCw4LjI0LDQ2LjUsMjMuMjVabS01NC44Ni00Mi41NWM3Ljc3LTkuMTQsMTIuMTctMjAuNjcsMTIuNDYtMzIuNjcuMDEtMS41OC0uMTQtMy4xNi0uNDYtNC43MS0xMy4zNSwxLjMtMjUuNjksNy42Ny0zNC41LDE3Ljc4LTcuODUsOC43OC0xMi40MSwyMC0xMi45MiwzMS43NiwwLDEuNDMuMTYsMi44Ni40Niw0LjI2LDEuMDUuMiwyLjEyLjMsMy4xOS4zLDEyLjQzLS45OSwyMy45MS03LjA0LDMxLjc2LTE2LjczWiIgZmlsbD0iIzAwMCIvPjwvc3ZnPg=="
++  },
++  "bada5566-a7aa-401f-bd96-45619a55120d": {
++    "name": "1Password",
++    "icon_dark": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQwIiBoZWlnaHQ9IjI0MCIgdmlld0JveD0iMCAwIDI0MCAyNDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgY2xpcC1ydWxlPSJldmVub2RkIiBkPSJNMjM5LjI1NyAxMjAuNDE3QzIzOS4yNTcgNTQuNDE5MyAxODUuNzU1IDAuOTE2NTA0IDExOS43NTcgMC45MTY1MDRDNTMuNzYwMSAwLjkxNjUwNCAwLjI1NzMyNCA1NC40MTkzIDAuMjU3MzI0IDEyMC40MTdDMC4yNTczMjQgMTg2LjQxNyA1My43NjAxIDIzOS45MTcgMTE5Ljc1NyAyMzkuOTE3QzE4NS43NTUgMjM5LjkxNyAyMzkuMjU3IDE4Ni40MTcgMjM5LjI1NyAxMjAuNDE3Wk05OC4wMDY5IDU0LjAyNzZDOTcuMDY3NCA1NS44NzE0IDk3LjA2NzQgNTguMjg1MSA5Ny4wNjc0IDYzLjExMjZWOTAuNDcyOUM5Ny4wNjc0IDkxLjY3ODggOTcuMDY3NCA5Mi4yODE3IDk3LjIxOTYgOTIuODM5MkM5Ny4zNTQ1IDkzLjMzMzEgOTcuNTc2MyA5My43OTkgOTcuODc0NiA5NC4yMTVDOTguMjExMyA5NC42ODQ3IDk4LjY3OTIgOTUuMDY0OCA5OS42MTUyIDk1LjgyNTFMMTA2LjUzNiAxMDEuNDQ3QzEwNy42NjQgMTAyLjM2NCAxMDguMjI4IDEwMi44MjIgMTA4LjQzMyAxMDMuMzc0QzEwOC42MTMgMTAzLjg1NyAxMDguNjEzIDEwNC4zOSAxMDguNDMzIDEwNC44NzNDMTA4LjIyOCAxMDUuNDI1IDEwNy42NjQgMTA1Ljg4MyAxMDYuNTM2IDEwNi44TDk5LjYxNTIgMTEyLjQyMkM5OC42NzkzIDExMy4xODIgOTguMjExMyAxMTMuNTYyIDk3Ljg3NDYgMTE0LjAzMkM5Ny41NzYzIDExNC40NDggOTcuMzU0NSAxMTQuOTE0IDk3LjIxOTYgMTE1LjQwOEM5Ny4wNjc0IDExNS45NjUgOTcuMDY3NCAxMTYuNTY4IDk3LjA2NzQgMTE3Ljc3NFYxNzcuNzE5Qzk3LjA2NzQgMTgyLjU0NyA5Ny4wNjc0IDE4NC45NjEgOTguMDA2OSAxODYuODA1Qzk4LjgzMzMgMTg4LjQyNiAxMDAuMTUyIDE4OS43NDUgMTAxLjc3NCAxOTAuNTcxQzEwMy42MTggMTkxLjUxMSAxMDYuMDMxIDE5MS41MTEgMTEwLjg1OSAxOTEuNTExSDEyOC42NTZDMTMzLjQ4MyAxOTEuNTExIDEzNS44OTcgMTkxLjUxMSAxMzcuNzQxIDE5MC41NzFDMTM5LjM2MyAxODkuNzQ1IDE0MC42ODEgMTg4LjQyNiAxNDEuNTA4IDE4Ni44MDVDMTQyLjQ0NyAxODQuOTYxIDE0Mi40NDcgMTgyLjU0NyAxNDIuNDQ3IDE3Ny43MTlWMTUwLjM1OUMxNDIuNDQ3IDE0OS4xNTMgMTQyLjQ0NyAxNDguNTUgMTQyLjI5NSAxNDcuOTkzQzE0Mi4xNiAxNDcuNDk5IDE0MS45MzggMTQ3LjAzMyAxNDEuNjQgMTQ2LjYxN0MxNDEuMzAzIDE0Ni4xNDcgMTQwLjgzNSAxNDUuNzY3IDEzOS44OTkgMTQ1LjAwN0wxMzIuOTc4IDEzOS4zODVDMTMxLjg1IDEzOC40NjggMTMxLjI4NiAxMzguMDEgMTMxLjA4MiAxMzcuNDU5QzEzMC45MDIgMTM2Ljk3NSAxMzAuOTAyIDEzNi40NDMgMTMxLjA4MiAxMzUuOTU5QzEzMS4yODYgMTM1LjQwNyAxMzEuODUgMTM0Ljk0OSAxMzIuOTc4IDEzNC4wMzNMMTM5Ljg5OSAxMjguNDFDMTQwLjgzNSAxMjcuNjUgMTQxLjMwMyAxMjcuMjcgMTQxLjY0IDEyNi44QzE0MS45MzggMTI2LjM4NCAxNDIuMTYgMTI1LjkxOCAxNDIuMjk1IDEyNS40MjRDMTQyLjQ0NyAxMjQuODY3IDE0Mi40NDcgMTI0LjI2NCAxNDIuNDQ3IDEyMy4wNThWNjMuMTEyNkMxNDIuNDQ3IDU4LjI4NTEgMTQyLjQ0NyA1NS44NzE0IDE0MS41MDggNTQuMDI3NkMxNDAuNjgxIDUyLjQwNTcgMTM5LjM2MyA1MS4wODcgMTM3Ljc0MSA1MC4yNjA2QzEzNS44OTcgNDkuMzIxMSAxMzMuNDgzIDQ5LjMyMTEgMTI4LjY1NiA0OS4zMjExSDExMC44NTlDMTA2LjAzMSA0OS4zMjExIDEwMy42MTggNDkuMzIxMSAxMDEuNzc0IDUwLjI2MDZDMTAwLjE1MiA1MS4wODcgOTguODMzMyA1Mi40MDU3IDk4LjAwNjkgNTQuMDI3NloiIGZpbGw9IiNGRkZFRkIiLz4KPC9zdmc+Cg==",
++    "icon_light": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQwIiBoZWlnaHQ9IjI0MCIgdmlld0JveD0iMCAwIDI0MCAyNDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgY2xpcC1ydWxlPSJldmVub2RkIiBkPSJNMjM5LjExNiAxMjAuNDE3QzIzOS4xMTYgNTQuNDE5MyAxODUuNjEzIDAuOTE2NTA0IDExOS42MTYgMC45MTY1MDRDNTMuNjE5IDAuOTE2NTA0IDAuMTE2MjExIDU0LjQxOTMgMC4xMTYyMTEgMTIwLjQxN0MwLjExNjIxMSAxODYuNDE3IDUzLjYxOSAyMzkuOTE3IDExOS42MTYgMjM5LjkxN0MxODUuNjEzIDIzOS45MTcgMjM5LjExNiAxODYuNDE3IDIzOS4xMTYgMTIwLjQxN1pNOTcuODY1OCA1NC4wMjc2Qzk2LjkyNjMgNTUuODcxNCA5Ni45MjYzIDU4LjI4NTEgOTYuOTI2MyA2My4xMTI2VjkwLjQ3MjlDOTYuOTI2MyA5MS42Nzg4IDk2LjkyNjMgOTIuMjgxNyA5Ny4wNzg1IDkyLjgzOTJDOTcuMjEzNCA5My4zMzMxIDk3LjQzNTIgOTMuNzk5IDk3LjczMzUgOTQuMjE1Qzk4LjA3MDIgOTQuNjg0NyA5OC41MzgxIDk1LjA2NDggOTkuNDc0MSA5NS44MjUxTDEwNi4zOTUgMTAxLjQ0N0MxMDcuNTIzIDEwMi4zNjQgMTA4LjA4NyAxMDIuODIyIDEwOC4yOTIgMTAzLjM3NEMxMDguNDcxIDEwMy44NTcgMTA4LjQ3MSAxMDQuMzkgMTA4LjI5MiAxMDQuODczQzEwOC4wODcgMTA1LjQyNSAxMDcuNTIzIDEwNS44ODMgMTA2LjM5NSAxMDYuOEw5OS40NzQxIDExMi40MjJDOTguNTM4MiAxMTMuMTgyIDk4LjA3MDIgMTEzLjU2MiA5Ny43MzM1IDExNC4wMzJDOTcuNDM1MiAxMTQuNDQ4IDk3LjIxMzQgMTE0LjkxNCA5Ny4wNzg1IDExNS40MDhDOTYuOTI2MyAxMTUuOTY1IDk2LjkyNjMgMTE2LjU2OCA5Ni45MjYzIDExNy43NzRWMTc3LjcxOUM5Ni45MjYzIDE4Mi41NDcgOTYuOTI2MyAxODQuOTYxIDk3Ljg2NTggMTg2LjgwNUM5OC42OTIyIDE4OC40MjYgMTAwLjAxMSAxODkuNzQ1IDEwMS42MzMgMTkwLjU3MUMxMDMuNDc3IDE5MS41MTEgMTA1Ljg5IDE5MS41MTEgMTEwLjcxOCAxOTEuNTExSDEyOC41MTVDMTMzLjM0MiAxOTEuNTExIDEzNS43NTYgMTkxLjUxMSAxMzcuNiAxOTAuNTcxQzEzOS4yMjEgMTg5Ljc0NSAxNDAuNTQgMTg4LjQyNiAxNDEuMzY3IDE4Ni44MDVDMTQyLjMwNiAxODQuOTYxIDE0Mi4zMDYgMTgyLjU0NyAxNDIuMzA2IDE3Ny43MTlWMTUwLjM1OUMxNDIuMzA2IDE0OS4xNTMgMTQyLjMwNiAxNDguNTUgMTQyLjE1NCAxNDcuOTkzQzE0Mi4wMTkgMTQ3LjQ5OSAxNDEuNzk3IDE0Ny4wMzMgMTQxLjQ5OSAxNDYuNjE3QzE0MS4xNjIgMTQ2LjE0NyAxNDAuNjk0IDE0NS43NjcgMTM5Ljc1OCAxNDUuMDA3TDEzMi44MzcgMTM5LjM4NUMxMzEuNzA5IDEzOC40NjggMTMxLjE0NSAxMzguMDEgMTMwLjk0IDEzNy40NTlDMTMwLjc2MSAxMzYuOTc1IDEzMC43NjEgMTM2LjQ0MyAxMzAuOTQgMTM1Ljk1OUMxMzEuMTQ1IDEzNS40MDcgMTMxLjcwOSAxMzQuOTQ5IDEzMi44MzcgMTM0LjAzM0wxMzkuNzU4IDEyOC40MUMxNDAuNjk0IDEyNy42NSAxNDEuMTYyIDEyNy4yNyAxNDEuNDk5IDEyNi44QzE0MS43OTcgMTI2LjM4NCAxNDIuMDE5IDEyNS45MTggMTQyLjE1NCAxMjUuNDI0QzE0Mi4zMDYgMTI0Ljg2NyAxNDIuMzA2IDEyNC4yNjQgMTQyLjMwNiAxMjMuMDU4VjYzLjExMjZDMTQyLjMwNiA1OC4yODUxIDE0Mi4zMDYgNTUuODcxNCAxNDEuMzY3IDU0LjAyNzZDMTQwLjU0IDUyLjQwNTcgMTM5LjIyMSA1MS4wODcgMTM3LjYgNTAuMjYwNkMxMzUuNzU2IDQ5LjMyMTEgMTMzLjM0MiA0OS4zMjExIDEyOC41MTUgNDkuMzIxMUgxMTAuNzE4QzEwNS44OSA0OS4zMjExIDEwMy40NzcgNDkuMzIxMSAxMDEuNjMzIDUwLjI2MDZDMTAwLjAxMSA1MS4wODcgOTguNjkyMiA1Mi40MDU3IDk3Ljg2NTggNTQuMDI3NloiIGZpbGw9IiMxQTI4NUYiLz4KPC9zdmc+Cg=="
++  },
++  "d548826e-79b4-db40-a3d8-11116f7e8349": {
++    "name": "Bitwarden",
++    "icon_dark": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjMwMCIgdmlld0JveD0iMCAwIDMwMCAzMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF82OF82MSkiPgo8cGF0aCBkPSJNMzAwIDI1My4xMjVDMzAwIDI3OS4wMjMgMjc5LjAyMyAzMDAgMjUzLjEyNSAzMDBINDYuODc1QzIwLjk3NjYgMzAwIDAgMjc5LjAyMyAwIDI1My4xMjVWNDYuODc1QzAgMjAuOTc2NiAyMC45NzY2IDAgNDYuODc1IDBIMjUzLjEyNUMyNzkuMDIzIDAgMzAwIDIwLjk3NjYgMzAwIDQ2Ljg3NVYyNTMuMTI1WiIgZmlsbD0iIzE3NUREQyIvPgo8cGF0aCBkPSJNMjQzLjEwNSAzNy42NzU4QzI0MS4yMDEgMzUuNzcxNSAyMzguOTQ1IDM0LjgzNCAyMzYuMzY3IDM0LjgzNEg2My42MzI4QzYxLjAyNTQgMzQuODM0IDU4Ljc5ODggMzUuNzcxNSA1Ni44OTQ1IDM3LjY3NThDNTQuOTkwMiAzOS41ODAxIDU0LjA1MjcgNDEuODM1OSA1NC4wNTI3IDQ0LjQxNDFWMTU5LjU4QzU0LjA1MjcgMTY4LjE2NCA1NS43MjI3IDE3Ni42ODkgNTkuMDYyNSAxODUuMTU2QzYyLjQwMjMgMTkzLjU5NCA2Ni41NjI1IDIwMS4wOTQgNzEuNTEzNyAyMDcuNjU2Qzc2LjQ2NDggMjE0LjE4OSA4Mi4zNTM1IDIyMC41NzYgODkuMjA5IDIyNi43ODdDOTYuMDY0NSAyMzIuOTk4IDEwMi4zOTMgMjM4LjEyNSAxMDguMTY0IDI0Mi4yMjdDMTEzLjk2NSAyNDYuMzI4IDEyMCAyNTAuMTk1IDEyNi4yOTkgMjUzLjg1N0MxMzIuNTk4IDI1Ny41MiAxMzcuMDggMjU5Ljk4IDEzOS43MTcgMjYxLjI3QzE0Mi4zNTQgMjYyLjU1OSAxNDQuNDkyIDI2My41ODQgMTQ2LjA3NCAyNjQuMjU4QzE0Ny4yNzUgMjY0Ljg0NCAxNDguNTY0IDI2NS4xNjYgMTQ5Ljk3MSAyNjUuMTY2QzE1MS4zNzcgMjY1LjE2NiAxNTIuNjY2IDI2NC44NzMgMTUzLjg2NyAyNjQuMjU4QzE1NS40NzkgMjYzLjU1NSAxNTcuNTg4IDI2Mi41NTkgMTYwLjI1NCAyNjEuMjdDMTYyLjg5MSAyNTkuOTggMTY3LjM3MyAyNTcuNDkgMTczLjY3MiAyNTMuODU3QzE3OS45NzEgMjUwLjE5NSAxODYuMDA2IDI0Ni4zMjggMTkxLjgwNyAyNDIuMjI3QzE5Ny42MDcgMjM4LjEyNSAyMDMuOTM2IDIzMi45NjkgMjEwLjc5MSAyMjYuNzg3QzIxNy42NDYgMjIwLjU3NiAyMjMuNTM1IDIxNC4yMTkgMjI4LjQ4NiAyMDcuNjU2QzIzMy40MzggMjAxLjA5NCAyMzcuNTY4IDE5My42MjMgMjQwLjkzOCAxODUuMTU2QzI0NC4yNzcgMTc2LjcxOSAyNDUuOTQ3IDE2OC4xOTMgMjQ1Ljk0NyAxNTkuNThWNDQuNDQzNEMyNDUuOTc3IDQxLjgzNTkgMjQ1LjAxIDM5LjU4MDEgMjQzLjEwNSAzNy42NzU4Wk0yMjAuODQgMTYwLjY2NEMyMjAuODQgMjAyLjM1NCAxNTAgMjM4LjI3MSAxNTAgMjM4LjI3MVY1OS41MDJIMjIwLjg0QzIyMC44NCA1OS41MDIgMjIwLjg0IDExOC45NzUgMjIwLjg0IDE2MC42NjRaIiBmaWxsPSJ3aGl0ZSIvPgo8L2c+CjxkZWZzPgo8Y2xpcFBhdGggaWQ9ImNsaXAwXzY4XzYxIj4KPHJlY3Qgd2lkdGg9IjMwMCIgaGVpZ2h0PSIzMDAiIGZpbGw9IndoaXRlIi8+CjwvY2xpcFBhdGg+CjwvZGVmcz4KPC9zdmc+Cg==",
++    "icon_light": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjMwMCIgdmlld0JveD0iMCAwIDMwMCAzMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF82OF82MSkiPgo8cGF0aCBkPSJNMzAwIDI1My4xMjVDMzAwIDI3OS4wMjMgMjc5LjAyMyAzMDAgMjUzLjEyNSAzMDBINDYuODc1QzIwLjk3NjYgMzAwIDAgMjc5LjAyMyAwIDI1My4xMjVWNDYuODc1QzAgMjAuOTc2NiAyMC45NzY2IDAgNDYuODc1IDBIMjUzLjEyNUMyNzkuMDIzIDAgMzAwIDIwLjk3NjYgMzAwIDQ2Ljg3NVYyNTMuMTI1WiIgZmlsbD0iIzE3NUREQyIvPgo8cGF0aCBkPSJNMjQzLjEwNSAzNy42NzU4QzI0MS4yMDEgMzUuNzcxNSAyMzguOTQ1IDM0LjgzNCAyMzYuMzY3IDM0LjgzNEg2My42MzI4QzYxLjAyNTQgMzQuODM0IDU4Ljc5ODggMzUuNzcxNSA1Ni44OTQ1IDM3LjY3NThDNTQuOTkwMiAzOS41ODAxIDU0LjA1MjcgNDEuODM1OSA1NC4wNTI3IDQ0LjQxNDFWMTU5LjU4QzU0LjA1MjcgMTY4LjE2NCA1NS43MjI3IDE3Ni42ODkgNTkuMDYyNSAxODUuMTU2QzYyLjQwMjMgMTkzLjU5NCA2Ni41NjI1IDIwMS4wOTQgNzEuNTEzNyAyMDcuNjU2Qzc2LjQ2NDggMjE0LjE4OSA4Mi4zNTM1IDIyMC41NzYgODkuMjA5IDIyNi43ODdDOTYuMDY0NSAyMzIuOTk4IDEwMi4zOTMgMjM4LjEyNSAxMDguMTY0IDI0Mi4yMjdDMTEzLjk2NSAyNDYuMzI4IDEyMCAyNTAuMTk1IDEyNi4yOTkgMjUzLjg1N0MxMzIuNTk4IDI1Ny41MiAxMzcuMDggMjU5Ljk4IDEzOS43MTcgMjYxLjI3QzE0Mi4zNTQgMjYyLjU1OSAxNDQuNDkyIDI2My41ODQgMTQ2LjA3NCAyNjQuMjU4QzE0Ny4yNzUgMjY0Ljg0NCAxNDguNTY0IDI2NS4xNjYgMTQ5Ljk3MSAyNjUuMTY2QzE1MS4zNzcgMjY1LjE2NiAxNTIuNjY2IDI2NC44NzMgMTUzLjg2NyAyNjQuMjU4QzE1NS40NzkgMjYzLjU1NSAxNTcuNTg4IDI2Mi41NTkgMTYwLjI1NCAyNjEuMjdDMTYyLjg5MSAyNTkuOTggMTY3LjM3MyAyNTcuNDkgMTczLjY3MiAyNTMuODU3QzE3OS45NzEgMjUwLjE5NSAxODYuMDA2IDI0Ni4zMjggMTkxLjgwNyAyNDIuMjI3QzE5Ny42MDcgMjM4LjEyNSAyMDMuOTM2IDIzMi45NjkgMjEwLjc5MSAyMjYuNzg3QzIxNy42NDYgMjIwLjU3NiAyMjMuNTM1IDIxNC4yMTkgMjI4LjQ4NiAyMDcuNjU2QzIzMy40MzggMjAxLjA5NCAyMzcuNTY4IDE5My42MjMgMjQwLjkzOCAxODUuMTU2QzI0NC4yNzcgMTc2LjcxOSAyNDUuOTQ3IDE2OC4xOTMgMjQ1Ljk0NyAxNTkuNThWNDQuNDQzNEMyNDUuOTc3IDQxLjgzNTkgMjQ1LjAxIDM5LjU4MDEgMjQzLjEwNSAzNy42NzU4Wk0yMjAuODQgMTYwLjY2NEMyMjAuODQgMjAyLjM1NCAxNTAgMjM4LjI3MSAxNTAgMjM4LjI3MVY1OS41MDJIMjIwLjg0QzIyMC44NCA1OS41MDIgMjIwLjg0IDExOC45NzUgMjIwLjg0IDE2MC42NjRaIiBmaWxsPSJ3aGl0ZSIvPgo8L2c+CjxkZWZzPgo8Y2xpcFBhdGggaWQ9ImNsaXAwXzY4XzYxIj4KPHJlY3Qgd2lkdGg9IjMwMCIgaGVpZ2h0PSIzMDAiIGZpbGw9IndoaXRlIi8+CjwvY2xpcFBhdGg+CjwvZGVmcz4KPC9zdmc+Cg=="
++  },
++  "531126d6-e717-415c-9320-3d9aa6981239": {
++    "name": "Dashlane",
++    "icon_dark": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0yNTcuNDc0IDM1OS4yMDlDMjU3LjQ3NCAzNTYuMTg5IDI1NC40NTQgMzUzLjE2OSAyNTAuMjE1IDM1MS45NTlMMTk5LjQxMSAzMzMuMjMxQzE5MC44OTUgMzI5LjYwMSAxODEuMjY0IDMzMy44MzEgMTgxLjI2NCAzMzkuODlWNDc1Ljc3OUMxODEuMjY0IDQ3OC44MDkgMTg0LjI4MyA0ODIuNDM4IDE4Ny4zMDMgNDgzLjY0OEwyMzkuMzI2IDUwMi4zNzZDMjQ3LjE5NSA1MDUuMzk2IDI1Ny40NzQgNTAxLjE2NiAyNTcuNDc0IDQ5NC41MDhWMzU5LjIwOVoiIGZpbGw9IndoaXRlIi8+CjxwYXRoIGQ9Ik0zNTIuNzM2IDMyMS4xMDRDMzUyLjczNiAzMTguMDg0IDM0OS43MTcgMzE1LjA2NCAzNDUuNDc3IDMxMy44NTRMMjk0LjY3NCAyOTUuMTI2QzI4Ni4xNTcgMjkxLjQ5NiAyNzYuNTI2IDI5NS43MjYgMjc2LjUyNiAzMDEuNzg1VjQzNy42NzRDMjc2LjUyNiA0NDAuNzA0IDI3OS41NDYgNDQ0LjMzMyAyODIuNTY2IDQ0NS41NDNMMzM0LjU4OSA0NjQuMjcxQzM0Mi40NTggNDY3LjI5MSAzNTIuNzM2IDQ2My4wNjEgMzUyLjczNiA0NTYuNDAzVjMyMS4xMDRaIiBmaWxsPSJ3aGl0ZSIvPgo8cGF0aCBkPSJNMjU3LjQ3NCAzNS4zMjExQzI1Ny40NzQgMzIuMzAxMyAyNTQuNDU0IDI5LjI4MTUgMjUwLjIxNSAyOC4wNzE3TDE5OS40MTEgOS4zNDM0M0MxOTAuODk1IDUuNzEzOTkgMTgxLjI2NCA5Ljk0MzU4IDE4MS4yNjQgMTYuMDAyMlYxNTEuODkyQzE4MS4yNjQgMTU0LjkyMSAxODQuMjgzIDE1OC41NTEgMTg3LjMwMyAxNTkuNzZMMjM5LjMyNiAxNzguNDg5QzI0Ny4xOTUgMTgxLjUwOSAyNTcuNDc0IDE3Ny4yNzkgMjU3LjQ3NCAxNzAuNjJWMzUuMzIxMVoiIGZpbGw9IndoaXRlIi8+CjxwYXRoIGQ9Ik0zNTIuNzM2IDkyLjQ3NzdDMzUyLjczNiA4OS40NTc5IDM0OS43MTcgODYuNDM4MiAzNDUuNDc3IDg1LjIyODNMMjk0LjY3NCA2Ni41QzI4Ni4xNTcgNjIuODcwNiAyNzYuNTI2IDY3LjEwMDIgMjc2LjUyNiA3My4xNTg4VjIwOS4wNDhDMjc2LjUyNiAyMTIuMDc4IDI3OS41NDYgMjE1LjcwNyAyODIuNTY2IDIxNi45MTdMMzM0LjU4OSAyMzUuNjQ1QzM0Mi40NTggMjM4LjY2NSAzNTIuNzM2IDIzNC40MzYgMzUyLjczNiAyMjcuNzc3VjkyLjQ3NzdaIiBmaWxsPSJ3aGl0ZSIvPgo8cGF0aCBkPSJNNDQ4IDE2OC42ODdDNDQ4IDE2NS42NjcgNDQ0Ljk4IDE2Mi42NDcgNDQwLjc0MSAxNjEuNDM3TDM4OS45MzcgMTQyLjcwOUMzODEuNDIxIDEzOS4wNzkgMzcxLjc5IDE0My4zMDkgMzcxLjc5IDE0OS4zNjhWMzYxLjQ2NkMzNzEuNzkgMzY0LjQ5NSAzNzQuODEgMzY4LjEyNSAzNzcuODI5IDM2OS4zMzVMNDI5Ljg1MiAzODguMDYzQzQzNy43MjEgMzkxLjA4MyA0NDggMzg2Ljg1MyA0NDggMzgwLjE5NFYxNjguNjg3WiIgZmlsbD0id2hpdGUiLz4KPHBhdGggZD0iTTE2Mi4yMSAzNS4zMzA2QzE2Mi4yMSAzMi4zMTA4IDE1OS4xOSAyOS4yODE1IDE1NC45NTEgMjguMDcxN0wxMDQuMTQ4IDkuMzQzNDNDOTUuNjc4NyA1LjcxMzk5IDg2IDkuOTQzNTggODYgMTYuMDAyMlY0NzUuNzg5Qzg2IDQ3OC44MDggODkuMDE5OCA0ODIuNDM4IDkyLjA0OTIgNDgzLjY0OEwxNDQuMDYzIDUwMi4zNzZDMTUxLjkzMSA1MDUuMzk2IDE2Mi4yMSA1MDEuMTY2IDE2Mi4yMSA0OTQuNTA3VjM1LjMzMDZaIiBmaWxsPSJ3aGl0ZSIvPgo8L3N2Zz4K",
++    "icon_light": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0yNTcuNDc0IDM1OS4yMDlDMjU3LjQ3NCAzNTYuMTg5IDI1NC40NTQgMzUzLjE2OSAyNTAuMjE1IDM1MS45NTlMMTk5LjQxMSAzMzMuMjMxQzE5MC44OTUgMzI5LjYwMSAxODEuMjY0IDMzMy44MzEgMTgxLjI2NCAzMzkuODlWNDc1Ljc3OUMxODEuMjY0IDQ3OC44MDkgMTg0LjI4MyA0ODIuNDM4IDE4Ny4zMDMgNDgzLjY0OEwyMzkuMzI2IDUwMi4zNzZDMjQ3LjE5NSA1MDUuMzk2IDI1Ny40NzQgNTAxLjE2NiAyNTcuNDc0IDQ5NC41MDhWMzU5LjIwOVoiIGZpbGw9IiMwOTM2M0YiLz4KPHBhdGggZD0iTTM1Mi43MzYgMzIxLjEwM0MzNTIuNzM2IDMxOC4wODQgMzQ5LjcxNyAzMTUuMDY0IDM0NS40NzcgMzEzLjg1NEwyOTQuNjc0IDI5NS4xMjZDMjg2LjE1NyAyOTEuNDk2IDI3Ni41MjYgMjk1LjcyNiAyNzYuNTI2IDMwMS43ODVWNDM3LjY3NEMyNzYuNTI2IDQ0MC43MDQgMjc5LjU0NiA0NDQuMzMzIDI4Mi41NjYgNDQ1LjU0M0wzMzQuNTg5IDQ2NC4yNzFDMzQyLjQ1OCA0NjcuMjkxIDM1Mi43MzYgNDYzLjA2MSAzNTIuNzM2IDQ1Ni40MDNWMzIxLjEwM1oiIGZpbGw9IiMwOTM2M0YiLz4KPHBhdGggZD0iTTI1Ny40NzQgMzUuMzIxMUMyNTcuNDc0IDMyLjMwMTMgMjU0LjQ1NCAyOS4yODE1IDI1MC4yMTUgMjguMDcxN0wxOTkuNDExIDkuMzQzNDNDMTkwLjg5NSA1LjcxMzk5IDE4MS4yNjQgOS45NDM1OCAxODEuMjY0IDE2LjAwMjJWMTUxLjg5MkMxODEuMjY0IDE1NC45MjEgMTg0LjI4MyAxNTguNTUxIDE4Ny4zMDMgMTU5Ljc2TDIzOS4zMjYgMTc4LjQ4OUMyNDcuMTk1IDE4MS41MDggMjU3LjQ3NCAxNzcuMjc5IDI1Ny40NzQgMTcwLjYyVjM1LjMyMTFaIiBmaWxsPSIjMDkzNjNGIi8+CjxwYXRoIGQ9Ik0zNTIuNzM2IDkyLjQ3NzdDMzUyLjczNiA4OS40NTc5IDM0OS43MTcgODYuNDM4MiAzNDUuNDc3IDg1LjIyODNMMjk0LjY3NCA2Ni41QzI4Ni4xNTcgNjIuODcwNiAyNzYuNTI2IDY3LjEwMDIgMjc2LjUyNiA3My4xNTg4VjIwOS4wNDhDMjc2LjUyNiAyMTIuMDc4IDI3OS41NDYgMjE1LjcwNyAyODIuNTY2IDIxNi45MTdMMzM0LjU4OSAyMzUuNjQ1QzM0Mi40NTggMjM4LjY2NSAzNTIuNzM2IDIzNC40MzYgMzUyLjczNiAyMjcuNzc3VjkyLjQ3NzdaIiBmaWxsPSIjMDkzNjNGIi8+CjxwYXRoIGQ9Ik00NDggMTY4LjY4N0M0NDggMTY1LjY2NyA0NDQuOTggMTYyLjY0NyA0NDAuNzQxIDE2MS40MzdMMzg5LjkzNyAxNDIuNzA5QzM4MS40MjEgMTM5LjA3OSAzNzEuNzkgMTQzLjMwOSAzNzEuNzkgMTQ5LjM2OFYzNjEuNDY2QzM3MS43OSAzNjQuNDk1IDM3NC44MSAzNjguMTI1IDM3Ny44MjkgMzY5LjMzNUw0MjkuODUyIDM4OC4wNjNDNDM3LjcyMSAzOTEuMDgzIDQ0OCAzODYuODUzIDQ0OCAzODAuMTk0VjE2OC42ODdaIiBmaWxsPSIjMDkzNjNGIi8+CjxwYXRoIGQ9Ik0xNjIuMjEgMzUuMzMwNkMxNjIuMjEgMzIuMzEwOCAxNTkuMTkgMjkuMjgxNSAxNTQuOTUxIDI4LjA3MTdMMTA0LjE0OCA5LjM0MzQzQzk1LjY3ODcgNS43MTM5OSA4NiA5Ljk0MzU4IDg2IDE2LjAwMjJWNDc1Ljc4OUM4NiA0NzguODA4IDg5LjAxOTggNDgyLjQzOCA5Mi4wNDkyIDQ4My42NDhMMTQ0LjA2MyA1MDIuMzc2QzE1MS45MzEgNTA1LjM5NiAxNjIuMjEgNTAxLjE2NiAxNjIuMjEgNDk0LjUwN1YzNS4zMzA2WiIgZmlsbD0iIzA5MzYzRiIvPgo8L3N2Zz4K"
++  },
++  "42b4fb4a-2866-43b2-9bf7-6c6669c2e5d3": {
++    "name": "Google Titan Security Key v2",
++    "icon_light": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAD1ElEQVR4AeyXU5gcTRSG62L927b/aJLpnt241zGmd2Pbxl1s29Yotm3bdqY3nN5oUakTq43leZ5v2Xi/qoMalBkiO84xTND1qNAwbyTdkshBtM4bZTtFvp97Tdu4SHo6UVu4Fu5Jc3AA4aKo0QTuNhFWKI5oPDzDdHACzcCKAog+gh2zFjIc/CYT+iN52TIibIQgxW4zlk8NSheq7PNtxwbrku5p5Y2gu8PDTdQDLspWUh/4KHqwqfCgCPqYl6G/NXLl0z/8jSiK1Qhz+7UZwJkKnxBj/dcbafMpBE56PsQqvq+TwN+eL4oDrjUMHoKLpFcphJ+s5OXXmLBfyQJ5DIGHdqlkml6PpiORyoCjB4E/pBs8Xof8+EHfnuCKWVNkwF+DVNP8TobxQ3pF8qoANmm1P37o/AgnxOcRgbf5rsdQOVF6i6TVAcvAAOjx0kB8p/HfQiYqpjd2SJ8vCXgSwL8uvucP2BtNvQ6/DKXHSF4dUBGA36cHkz7DCWUtAI+5aBuVPg2s8h8OsEJ6ND8EUuooSq9BILcBqLj82iKFEdGTx3oqvAe/TKiAr0kZeLzSn0pjA6BzQjuApUQK/cN0YCBJtQEEkfYGcJY1ACkUlJ4NcDKK2JKeDeySNLDav2E6MHBJYBL7jxeD51cFJfeel2+pCgOT5Qp6vOQc6MWvEjJQUwj+9IrPcAVPDKacLLbOYv9FBkVkT76t5A70ShwucJgL/vF98CuW/IyLuMoC/DM52OnGGfBtkzIQ2cNXUew4sekF+MPVAbjfgrwA/Y5oR1yk3vDhPRLLyqkBph//LYIQS6PrKz/CdWczACuka6Ez7D/qBc908X5I4I5J5n/PxE1SnwmCNi79/kasuyRASukY7Y7X5bNsRE/fPDmrT1KsKZIKymGvC4AydYpyls+paeV78Itkts/bTBcsb5ASsF0KTDygXPbOzORaiqZ0PhcbGzax65HwPl6Z/T+xs/yHO+1hBCwJAOXLztFOtjfcK/hcd/yflINtSq7b9uI+2/TGmBlwVPIILbD6wgEvgheo1G2ifUTrQAAMBoWup2dVwYWGLRcpXj4WqQmrk50MLzBLBcaOJIPq7psGevi6q29v6xg/yhXnMdOEbWo7HN733Iu895DU8QMWTSZg+pppgp5V7XHRwVtfwOsTJI9bQscxx0TcYFg4pHeQwWUhLzhkGDgUuotlkZEBK2N1sTVJgZ/TEf4BeWZ/y7xynyKzAgYX7bBXJEW+THpmCOqU1RHX0Tqr8pcoLQMOdmAGchd6/vPdSXonPWDCPxmwQADibHC/YhiAUQAA0S0KWSVGA04AAAAASUVORK5CYII=",
++    "icon_dark": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAD1ElEQVR4AeyXU5gcTRSG62L927b/aJLpnt241zGmd2Pbxl1s29Yotm3bdqY3nN5oUakTq43leZ5v2Xi/qoMalBkiO84xTND1qNAwbyTdkshBtM4bZTtFvp97Tdu4SHo6UVu4Fu5Jc3AA4aKo0QTuNhFWKI5oPDzDdHACzcCKAog+gh2zFjIc/CYT+iN52TIibIQgxW4zlk8NSheq7PNtxwbrku5p5Y2gu8PDTdQDLspWUh/4KHqwqfCgCPqYl6G/NXLl0z/8jSiK1Qhz+7UZwJkKnxBj/dcbafMpBE56PsQqvq+TwN+eL4oDrjUMHoKLpFcphJ+s5OXXmLBfyQJ5DIGHdqlkml6PpiORyoCjB4E/pBs8Xof8+EHfnuCKWVNkwF+DVNP8TobxQ3pF8qoANmm1P37o/AgnxOcRgbf5rsdQOVF6i6TVAcvAAOjx0kB8p/HfQiYqpjd2SJ8vCXgSwL8uvucP2BtNvQ6/DKXHSF4dUBGA36cHkz7DCWUtAI+5aBuVPg2s8h8OsEJ6ND8EUuooSq9BILcBqLj82iKFEdGTx3oqvAe/TKiAr0kZeLzSn0pjA6BzQjuApUQK/cN0YCBJtQEEkfYGcJY1ACkUlJ4NcDKK2JKeDeySNLDav2E6MHBJYBL7jxeD51cFJfeel2+pCgOT5Qp6vOQc6MWvEjJQUwj+9IrPcAVPDKacLLbOYv9FBkVkT76t5A70ShwucJgL/vF98CuW/IyLuMoC/DM52OnGGfBtkzIQ2cNXUew4sekF+MPVAbjfgrwA/Y5oR1yk3vDhPRLLyqkBph//LYIQS6PrKz/CdWczACuka6Ez7D/qBc908X5I4I5J5n/PxE1SnwmCNi79/kasuyRASukY7Y7X5bNsRE/fPDmrT1KsKZIKymGvC4AydYpyls+paeV78Itkts/bTBcsb5ASsF0KTDygXPbOzORaiqZ0PhcbGzax65HwPl6Z/T+xs/yHO+1hBCwJAOXLztFOtjfcK/hcd/yflINtSq7b9uI+2/TGmBlwVPIILbD6wgEvgheo1G2ifUTrQAAMBoWup2dVwYWGLRcpXj4WqQmrk50MLzBLBcaOJIPq7psGevi6q29v6xg/yhXnMdOEbWo7HN733Iu895DU8QMWTSZg+pppgp5V7XHRwVtfwOsTJI9bQscxx0TcYFg4pHeQwWUhLzhkGDgUuotlkZEBK2N1sTVJgZ/TEf4BeWZ/y7xynyKzAgYX7bBXJEW+THpmCOqU1RHX0Tqr8pcoLQMOdmAGchd6/vPdSXonPWDCPxmwQADibHC/YhiAUQAA0S0KWSVGA04AAAAASUVORK5CYII="
++  }
++}
+diff --git a/src/lib/accounts.ts b/src/lib/accounts.ts
+new file mode 100644
+index 0000000..cbe2e9f
+--- /dev/null
++++ b/src/lib/accounts.ts
+@@ -0,0 +1,52 @@
++import { DatabaseSync } from 'node:sqlite';
++import { mkdirSync } from 'node:fs';
++import { dirname, resolve } from 'node:path';
++import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
++import type { AstroCookies } from 'astro';
++import type { Account, StoredPasskeyCredential } from './passkey-types';
++
++// Use a persistent volume for this path in production. SQLite serializes writes.
++const path = resolve(process.env.ACCOUNT_DB_PATH || '.data/accounts.sqlite');
++mkdirSync(dirname(path), { recursive: true });
++export const db = new DatabaseSync(path);
++db.exec(`PRAGMA journal_mode=WAL;
++  PRAGMA foreign_keys=ON;
++  CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL COLLATE NOCASE, displayName TEXT NOT NULL, password TEXT NOT NULL);
++  CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
++  CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id), rpId TEXT NOT NULL, name TEXT NOT NULL, aaguid TEXT NOT NULL, registeredAt INTEGER NOT NULL, lastUsedAt INTEGER, publicKey TEXT NOT NULL, counter INTEGER NOT NULL, transports TEXT NOT NULL);
++  CREATE TABLE IF NOT EXISTS challenges (token TEXT PRIMARY KEY, userId TEXT NOT NULL, challenge TEXT NOT NULL, origin TEXT NOT NULL, kind TEXT NOT NULL, expires INTEGER NOT NULL);`);
++const cookieName = 'times_account';
++const cookiePath = import.meta.env.BASE_URL;
++const hash = (value: string) => createHash('sha256').update(value).digest('hex');
++export function passwordHash(password: string) {
++  const salt = randomBytes(16).toString('hex');
++  return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`;
++}
++export function passwordMatches(password: string, stored: string) {
++  const [salt, value] = stored.split(':');
++  return timingSafeEqual(scryptSync(password, salt, 64), Buffer.from(value, 'hex'));
++}
++export function currentUser(cookies: AstroCookies): Account | undefined {
++  const token = cookies.get(cookieName)?.value;
++  if (!token) return;
++  return db.prepare('SELECT users.id, users.name, users.displayName FROM users JOIN sessions ON users.id = sessions.userId WHERE sessions.token = ? AND sessions.expires > ?').get(hash(token), Date.now()) as Account | undefined;
++}
++export function signIn(cookies: AstroCookies, userId: string, secure: boolean) {
++  const token = randomBytes(32).toString('base64url');
++  db.prepare('DELETE FROM sessions WHERE expires <= ?').run(Date.now());
++  db.prepare('INSERT INTO sessions VALUES (?, ?, ?)').run(hash(token), userId, Date.now() + 7 * 86400000);
++  cookies.set(cookieName, token, { path: cookiePath, httpOnly: true, secure, sameSite: 'lax', maxAge: 7 * 86400 });
++}
++export function listCredentials(userId: string, rpId: string): StoredPasskeyCredential[] {
++  return db.prepare('SELECT id, userId AS passkeyUserId, rpId, name, aaguid, registeredAt, lastUsedAt FROM credentials WHERE userId = ? AND rpId = ? ORDER BY registeredAt DESC').all(userId, rpId) as unknown as StoredPasskeyCredential[];
++}
++export function relyingParty(url: URL) {
++  const origin = process.env.WEBAUTHN_ORIGIN || url.origin;
++  return { origin, rpId: new URL(origin).hostname };
++}
++export function json(data: unknown, status = 200) {
++  return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
++}
++export function validName(value: unknown): value is string {
++  return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 100;
++}
+diff --git a/src/lib/passkey-client.ts b/src/lib/passkey-client.ts
+new file mode 100644
+index 0000000..ccf3103
+--- /dev/null
++++ b/src/lib/passkey-client.ts
+@@ -0,0 +1,27 @@
++import type { Account, StoredPasskeyCredential } from './passkey-types';
++
++type SignalCredential = typeof PublicKeyCredential & {
++  signalAllAcceptedCredentials?: (options: { rpId: string; userId: string; allAcceptedCredentialIds: string[] }) => Promise<void>;
++  signalCurrentUserDetails?: (options: { rpId: string; userId: string; name: string; displayName: string }) => Promise<void>;
++};
++export async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
++  const response = await fetch(`${import.meta.env.BASE_URL}api/${path}`, {
++    method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
++    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
++  });
++  const data = await response.json();
++  if (!response.ok) throw new Error(data.error || 'The request failed. Please try again.');
++  return data as T;
++}
++export async function syncAccepted(rpId: string, userId: string, credentials: StoredPasskeyCredential[]) {
++  const credential = window.PublicKeyCredential as SignalCredential | undefined;
++  if (credential?.signalAllAcceptedCredentials) {
++    await credential.signalAllAcceptedCredentials({ rpId, userId, allAcceptedCredentialIds: credentials.map(c => c.id) });
++  }
++}
++export async function syncUser(rpId: string, user: Account) {
++  const credential = window.PublicKeyCredential as SignalCredential | undefined;
++  if (credential?.signalCurrentUserDetails) {
++    await credential.signalCurrentUserDetails({ rpId, userId: user.id, name: user.name, displayName: user.displayName });
++  }
++}
+diff --git a/src/lib/passkey-providers.ts b/src/lib/passkey-providers.ts
+new file mode 100644
+index 0000000..3b80212
+--- /dev/null
++++ b/src/lib/passkey-providers.ts
+@@ -0,0 +1,14 @@
++import aaguids from './aaguids.json';
++// Local subset of passkeydeveloper/passkey-authenticator-aaguids combined_aaguid.json.
++// AAGUIDs are display hints, never a basis for security decisions.
++const registry: Record<string, { name: string; icon_light?: string; icon_dark?: string }> = aaguids;
++export const fallbackIcon = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40"><rect width="40" height="40" rx="8" fill="#e5e7eb"/><circle cx="15" cy="18" r="5" fill="none" stroke="#374151" stroke-width="2"/><path d="M20 18h12m-4 0v5m-4-5v3" stroke="#374151" stroke-width="2"/></svg>')}`;
++export function passkeyProvider(aaguid: string) {
++  const key = aaguid.toLowerCase();
++  if (key === '00000000-0000-0000-0000-000000000000') return { name: 'Unknown passkey provider', icon: undefined };
++  const provider = registry[key];
++  return {
++    name: provider?.name || 'Unknown passkey provider',
++    icon: provider?.icon_light,
++  };
++}
+diff --git a/src/lib/passkey-types.ts b/src/lib/passkey-types.ts
+new file mode 100644
+index 0000000..67b906f
+--- /dev/null
++++ b/src/lib/passkey-types.ts
+@@ -0,0 +1,11 @@
++export interface Account { id: string; name: string; displayName: string }
++export interface StoredPasskeyCredential {
++  id: string;
++  passkeyUserId: string;
++  rpId: string;
++  name: string;
++  aaguid: string;
++  registeredAt: number;
++  lastUsedAt?: number | null;
++}
++export interface SettingsData { user: Account; credentials: StoredPasskeyCredential[]; rpId: string }
+diff --git a/src/pages/api/account/[...action].ts b/src/pages/api/account/[...action].ts
+new file mode 100644
+index 0000000..d1f7465
+--- /dev/null
++++ b/src/pages/api/account/[...action].ts
+@@ -0,0 +1,94 @@
++import type { APIRoute } from 'astro';
++import { randomBytes } from 'node:crypto';
++import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
++import { currentUser, db, json, listCredentials, passwordHash, passwordMatches, relyingParty, signIn, validName } from '../../../lib/accounts';
++import type { Account } from '../../../lib/passkey-types';
++
++export const ALL: APIRoute = async ({ request, cookies, params, url }) => {
++  const action = params.action;
++  const { origin, rpId } = relyingParty(url);
++  // All mutations, including login, require same-origin JSON requests.
++  if (request.method !== 'GET' && (request.headers.get('origin') !== url.origin || !request.headers.get('content-type')?.includes('application/json'))) return json({ error: 'Invalid request origin or content type.' }, 403);
++  try {
++    const user = currentUser(cookies);
++    if (request.method === 'POST' && (action === 'login' || action === 'register')) {
++      const { username, password } = await request.json();
++      if (!validName(username) || typeof password !== 'string' || password.length < 8 || password.length > 256) return json({ error: 'Use a username of 1–100 characters and a password of 8–256 characters.' }, 400);
++      const existing = db.prepare('SELECT * FROM users WHERE name = ?').get(username.trim()) as (Account & { password: string }) | undefined;
++      if (action === 'register') {
++        if (existing) return json({ error: 'That username is already taken.' }, 409);
++        db.prepare('INSERT INTO users VALUES (?, ?, ?, ?)').run(randomBytes(32).toString('base64url'), username.trim(), username.trim(), passwordHash(password));
++        return json({ success: true });
++      }
++      if (!existing || !passwordMatches(password, existing.password)) return json({ error: 'Incorrect username or password.' }, 401);
++      signIn(cookies, existing.id, url.protocol === 'https:');
++      return json({ success: true });
++    }
++    if (request.method === 'POST' && action === 'authentication/options') {
++      const { username } = await request.json();
++      if (!validName(username)) return json({ error: 'Enter your username first.' }, 400);
++      const account = db.prepare('SELECT id FROM users WHERE name = ?').get(username.trim());
++      if (!account) return json({ error: 'No passkeys are available for this account.' }, 400);
++      const credentials = listCredentials(String(account.id), rpId);
++      if (!credentials.length) return json({ error: 'No passkeys are available for this account.' }, 400);
++      const options = await generateAuthenticationOptions({ rpID: rpId, allowCredentials: credentials.map(({ id }) => ({ id })), userVerification: 'required' });
++      saveChallenge(String(account.id), options.challenge, 'authentication');
++      return json(options);
++    }
++    if (request.method === 'POST' && action === 'authentication/verify') {
++      const challenge = takeChallenge('authentication');
++      if (!challenge) return json({ error: 'Passkey request expired. Try again.' }, 400);
++      const response = await request.json();
++      const credential = db.prepare('SELECT * FROM credentials WHERE id = ? AND userId = ? AND rpId = ?').get(response.id, challenge.userId, rpId);
++      if (!credential) return json({ error: 'Passkey not found.' }, 400);
++      const result = await verifyAuthenticationResponse({ response, expectedChallenge: challenge.challenge, expectedOrigin: origin, expectedRPID: rpId, credential: { id: String(credential.id), publicKey: new Uint8Array(Buffer.from(String(credential.publicKey), 'base64url')), counter: Number(credential.counter), transports: JSON.parse(String(credential.transports)) } });
++      if (!result.verified) return json({ error: 'Could not verify passkey.' }, 400);
++      db.prepare('UPDATE credentials SET lastUsedAt = ?, counter = ? WHERE id = ?').run(Date.now(), result.authenticationInfo.newCounter, String(credential.id));
++      signIn(cookies, challenge.userId, url.protocol === 'https:');
++      return json({ success: true });
++    }
++    if (!user) return json({ error: 'Please sign in to manage your account.' }, 401);
++    if (request.method === 'POST' && action === 'logout') {
++      const token = cookies.get('times_account')?.value;
++      if (token) {
++        const { createHash } = await import('node:crypto');
++        db.prepare('DELETE FROM sessions WHERE token = ?').run(createHash('sha256').update(token).digest('hex'));
++      }
++      cookies.delete('times_account', { path: import.meta.env.BASE_URL });
++      return json({ success: true });
++    }
++    if (request.method === 'GET' && action === 'settings') return json({ user, credentials: listCredentials(user.id, rpId), rpId });
++    if (request.method === 'POST' && action === 'registration/options') {
++      const options = await generateRegistrationOptions({ rpName: 'The DevTools Times', rpID: rpId, userID: new Uint8Array(Buffer.from(user.id, 'base64url')), userName: user.name, userDisplayName: user.displayName, attestationType: 'none', excludeCredentials: listCredentials(user.id, rpId).map(({ id }) => ({ id })), authenticatorSelection: { residentKey: 'required', userVerification: 'required' } });
++      saveChallenge(user.id, options.challenge, 'registration');
++      return json(options);
++    }
++    if (request.method === 'POST' && action === 'registration/verify') {
++      const challenge = takeChallenge('registration');
++      if (!challenge || challenge.userId !== user.id) return json({ error: 'Passkey request expired. Try again.' }, 400);
++      const result = await verifyRegistrationResponse({ response: await request.json(), expectedChallenge: challenge.challenge, expectedOrigin: origin, expectedRPID: rpId });
++      if (!result.verified) return json({ error: 'Could not verify passkey.' }, 400);
++      const { credential, aaguid } = result.registrationInfo;
++      db.prepare('INSERT INTO credentials VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)').run(credential.id, user.id, rpId, '', aaguid, Date.now(), Buffer.from(credential.publicKey).toString('base64url'), credential.counter, JSON.stringify(credential.transports || []));
++      return json({ success: true });
++    }
++    return json({ error: 'Not found.' }, 404);
++
++    function saveChallenge(userId: string, challenge: string, kind: string) {
++      const token = randomBytes(32).toString('base64url');
++      db.prepare('DELETE FROM challenges WHERE expires <= ?').run(Date.now());
++      db.prepare('INSERT INTO challenges VALUES (?, ?, ?, ?, ?, ?)').run(token, userId, challenge, origin, kind, Date.now() + 300000);
++      cookies.set('times_challenge', token, { path: import.meta.env.BASE_URL, httpOnly: true, secure: url.protocol === 'https:', sameSite: 'strict', maxAge: 300 });
++    }
++    function takeChallenge(kind: string) {
++      const token = cookies.get('times_challenge')?.value || '';
++      const record = db.prepare('DELETE FROM challenges WHERE token = ? RETURNING *').get(token);
++      cookies.delete('times_challenge', { path: import.meta.env.BASE_URL });
++      if (!record || record.kind !== kind || record.origin !== origin || Number(record.expires) <= Date.now()) return;
++      return { userId: String(record.userId), challenge: String(record.challenge) };
++    }
++  } catch (error) {
++    console.error('Account request failed', error);
++    return json({ error: 'The request could not be completed. Please try again.' }, 400);
++  }
++};
+diff --git a/src/pages/api/credential/[id].ts b/src/pages/api/credential/[id].ts
+new file mode 100644
+index 0000000..780a474
+--- /dev/null
++++ b/src/pages/api/credential/[id].ts
+@@ -0,0 +1,24 @@
++import type { APIRoute } from 'astro';
++import { currentUser, db, json, listCredentials, relyingParty, validName } from '../../../lib/accounts';
++const mutate: APIRoute = async ({ request, cookies, params, url }) => {
++  if (request.headers.get('origin') !== url.origin || !request.headers.get('content-type')?.includes('application/json')) return json({ error: 'Invalid request.' }, 403);
++  const user = currentUser(cookies);
++  if (!user) return json({ error: 'Please sign in.' }, 401);
++  const { rpId } = relyingParty(url);
++  const credential = listCredentials(user.id, rpId).find(c => c.id === params.id);
++  if (!credential) return json({ error: 'Credential not found.' }, 404);
++  try {
++    if (request.method === 'DELETE') {
++      db.prepare('DELETE FROM credentials WHERE id = ? AND userId = ?').run(credential.id, user.id);
++      return json({ success: true, credentials: listCredentials(user.id, rpId) });
++    }
++    const { name } = await request.json();
++    if (!validName(name)) return json({ error: 'Use a name of 1–100 characters.' }, 400);
++    db.prepare('UPDATE credentials SET name = ? WHERE id = ? AND userId = ?').run(name.trim(), credential.id, user.id);
++    return json({ ...credential, name: name.trim() });
++  } catch {
++    return json({ error: 'Unable to update the passkey. Please try again.' }, 400);
++  }
++};
++export const PUT = mutate;
++export const DELETE = mutate;
+diff --git a/src/pages/api/credentials.ts b/src/pages/api/credentials.ts
+new file mode 100644
+index 0000000..d34afbf
+--- /dev/null
++++ b/src/pages/api/credentials.ts
+@@ -0,0 +1,6 @@
++import type { APIRoute } from 'astro';
++import { currentUser, json, listCredentials, relyingParty } from '../../lib/accounts';
++export const GET: APIRoute = async ({ cookies, url }) => {
++  const user = currentUser(cookies);
++  return user ? json(listCredentials(user.id, relyingParty(url).rpId)) : json({ error: 'Please sign in.' }, 401);
++};
+diff --git a/src/pages/api/user.ts b/src/pages/api/user.ts
+new file mode 100644
+index 0000000..09ad8a6
+--- /dev/null
++++ b/src/pages/api/user.ts
+@@ -0,0 +1,17 @@
++import type { APIRoute } from 'astro';
++import { currentUser, db, json, validName } from '../../lib/accounts';
++export const PUT: APIRoute = async ({ request, cookies, url }) => {
++  if (request.headers.get('origin') !== url.origin || !request.headers.get('content-type')?.includes('application/json')) return json({ error: 'Invalid request.' }, 403);
++  const user = currentUser(cookies);
++  if (!user) return json({ error: 'Please sign in.' }, 401);
++  try {
++    const { name, displayName } = await request.json();
++    if (!validName(name) || !validName(displayName)) return json({ error: 'Both names must contain 1–100 characters.' }, 400);
++    const duplicate = db.prepare('SELECT id FROM users WHERE name = ? AND id != ?').get(name.trim(), user.id);
++    if (duplicate) return json({ error: 'That username is already taken.' }, 409);
++    db.prepare('UPDATE users SET name = ?, displayName = ? WHERE id = ?').run(name.trim(), displayName.trim(), user.id);
++    return json({ ...user, name: name.trim(), displayName: displayName.trim() });
++  } catch {
++    return json({ error: 'Unable to update your account. Please try again.' }, 400);
++  }
++};
+diff --git a/src/pages/settings.astro b/src/pages/settings.astro
+new file mode 100644
+index 0000000..50aea56
+--- /dev/null
++++ b/src/pages/settings.astro
+@@ -0,0 +1,14 @@
++---
++import Layout from '../layouts/Layout.astro';
++import AccountSettings from '../components/AccountSettings';
++import { currentUser } from '../lib/accounts';
++if (!currentUser(Astro.cookies)) return Astro.redirect(`${import.meta.env.BASE_URL}signin?next=settings`);
++Astro.response.headers.set('Cache-Control', 'no-store');
++---
++<Layout title="Account settings | The DevTools Times">
++  <div class="max-w-2xl mx-auto py-12 px-4 sm:px-6">
++    <h1 class="text-3xl font-bold mb-2">Account settings</h1>
++    <p class="text-gray-600 mb-8">Manage your profile and the passkeys linked to your account.</p>
++    <AccountSettings client:load />
++  </div>
++</Layout>
+diff --git a/tsconfig.passkeys.json b/tsconfig.passkeys.json
+new file mode 100644
+index 0000000..19f9a4b
+--- /dev/null
++++ b/tsconfig.passkeys.json
+@@ -0,0 +1,14 @@
++{
++  "extends": "./tsconfig.json",
++  "compilerOptions": { "noEmit": true, "skipLibCheck": true, "types": ["astro/client", "node"] },
++  "include": [
++    "src/lib/**/*.ts",
++    "src/pages/api/account/**/*.ts",
++    "src/pages/api/credential/**/*.ts",
++    "src/pages/api/credentials.ts",
++    "src/pages/api/user.ts",
++    "src/components/AccountSettings.tsx",
++    "src/components/SignInForm.tsx",
++    "src/components/SignUpForm.tsx"
++  ]
++}

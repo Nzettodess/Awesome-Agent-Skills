@@ -1,0 +1,247 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..41ced44
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,3 @@
++node_modules/
++dist/
++/equipment.js
+diff --git a/build.mjs b/build.mjs
+new file mode 100644
+index 0000000..4f784f2
+--- /dev/null
++++ b/build.mjs
+@@ -0,0 +1,4 @@
++import { copyFile } from 'node:fs/promises';
++await copyFile(new URL('./index.html', import.meta.url), new URL('./dist/index.html', import.meta.url));
++// Keep the existing root-based static launcher working after a build as well.
++await copyFile(new URL('./dist/equipment.js', import.meta.url), new URL('./equipment.js', import.meta.url));
+diff --git a/equipment.ts b/equipment.ts
+new file mode 100644
+index 0000000..16558e6
+--- /dev/null
++++ b/equipment.ts
+@@ -0,0 +1,120 @@
++type NetworkPermission = 'local-network' | 'loopback-network';
++type AddressSpace = 'local' | 'loopback';
++type LocalRequestInit = RequestInit & { targetAddressSpace: AddressSpace };
++
++function element<T extends HTMLElement>(id: string, kind: new () => T): T {
++  const node = document.getElementById(id);
++  if (!(node instanceof kind)) throw new Error(`Missing equipment control: ${id}`);
++  return node;
++}
++
++function endpoint(value: string, space: AddressSpace): URL {
++  const url = new URL(value);
++  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) {
++    throw new Error('Use an HTTP or HTTPS URL without credentials or a fragment.');
++  }
++  const host = url.hostname.toLowerCase().replace(/\.$/, '');
++  const loopback = host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127\./.test(host);
++  if (space === 'loopback' && !loopback) throw new Error('The utility address must use localhost, 127.x.x.x, or [::1].');
++  if (space === 'local' && loopback) throw new Error('Use a LAN address for the brewer, not a loopback address.');
++  // Custom LAN DNS names are allowed; the browser verifies the resolved address space.
++  return url;
++}
++
++async function setup(id: string, permission: NetworkPermission, space: AddressSpace): Promise<void> {
++  const form = element(`${id}-form`, HTMLFormElement);
++  const input = element(`${id}-url`, HTMLInputElement);
++  const badge = element(`${id}-permission`, HTMLSpanElement);
++  const feedback = element(`${id}-feedback`, HTMLParagraphElement);
++  const remediation = element(`${id}-remediation`, HTMLParagraphElement);
++  const button = form.querySelector('button');
++  if (!button) throw new Error('Missing connect button');
++  let state: PermissionState = 'prompt';
++  let known = false;
++  let ready = false;
++  let controller: AbortController | undefined;
++  let generation = 0;
++  const secure = window.isSecureContext && location.protocol === 'https:';
++
++  function render(): void {
++    badge.textContent = known ? state : 'Ask on connect (permission query unavailable)';
++    remediation.hidden = state !== 'denied';
++    button!.disabled = !secure || !ready || state === 'denied' || !!controller;
++  }
++
++  function cancel(): void {
++    generation++;
++    controller?.abort();
++    controller = undefined;
++    render();
++  }
++
++  async function connect(): Promise<void> {
++    if (!secure || !ready || state === 'denied' || controller) return;
++    let url: URL;
++    try { url = endpoint(input.value.trim(), space); }
++    catch (error) {
++      feedback.textContent = error instanceof Error ? error.message : 'Enter a valid endpoint URL.';
++      return;
++    }
++    const attempt = ++generation;
++    const active = new AbortController();
++    controller = active;
++    render();
++    feedback.textContent = 'Connecting… If asked, allow access in the browser permission prompt.';
++    const timeout = window.setTimeout(() => active.abort(), 12000);
++    try {
++      const options: LocalRequestInit = {
++        method: 'GET', mode: 'cors', credentials: 'omit', cache: 'no-store',
++        redirect: 'error', targetAddressSpace: space, signal: active.signal,
++      };
++      const response = await fetch(new Request(url, options));
++      if (!response.ok) throw new Error(`Service returned HTTP ${response.status}. Check the status endpoint and try again.`);
++      // A successful CORS-readable response is enough to confirm connectivity.
++      await response.body?.cancel();
++      if (attempt === generation) feedback.textContent = `Connected. Status endpoint responded successfully (HTTP ${response.status}).`;
++    } catch (error) {
++      if (attempt !== generation) return;
++      feedback.textContent = active.signal.aborted
++        ? 'Connection timed out. Check the service is running and reachable, then retry.'
++        : error instanceof TypeError
++          ? 'Connection failed. Check the address, browser network permissions, and service CORS settings. Ensure the brewer is on the same Wi-Fi or the utility is running. Your browser may not support local HTTP connections.'
++          : error instanceof Error ? error.message : 'Connection failed. Check the service and try again.';
++    } finally {
++      window.clearTimeout(timeout);
++      if (attempt === generation) { controller = undefined; render(); }
++    }
++  }
++
++  form.addEventListener('submit', event => { event.preventDefault(); void connect(); });
++  input.addEventListener('input', () => { cancel(); feedback.textContent = 'Address changed. Connect to check this endpoint.'; });
++  window.addEventListener('pagehide', cancel);
++  try {
++    if (navigator.permissions?.query) {
++      // DOM typings may lag behind the browser's granular LNA descriptors.
++      const descriptor = { name: permission } as unknown as PermissionDescriptor;
++      const status = await navigator.permissions.query(descriptor);
++      known = true;
++      state = status.state;
++      status.addEventListener('change', () => {
++        state = status.state;
++        cancel();
++        feedback.textContent = state === 'denied' ? 'Access blocked. Update browser Site settings to reconnect.' : 'Permission updated. Ready to connect.';
++        if (state === 'granted') void connect();
++      });
++    }
++  } catch {
++    // Unsupported permission names fall back to an explicit user gesture.
++    state = 'prompt';
++  }
++  ready = true;
++  render();
++  feedback.textContent = !secure ? 'HTTPS is required to connect.' : state === 'denied'
++    ? 'Access blocked. Update browser Site settings to reconnect.'
++    : 'Ready. Connect to check the service and allow access if prompted.';
++  if (state === 'granted') void connect();
++}
++
++element('secure-notice', HTMLParagraphElement).hidden = window.isSecureContext && location.protocol === 'https:';
++void setup('brewer', 'local-network', 'local');
++void setup('companion', 'loopback-network', 'loopback');
+diff --git a/index.html b/index.html
+index 66c9173..5759e47 100644
+--- a/index.html
++++ b/index.html
+@@ -142,6 +142,17 @@
+       margin-top: 40px;
+     }
+ 
++    .equipment { margin-top: 48px; }
++    .equipment .card { text-align: left; }
++    .equipment label { display: block; font-weight: 600; margin-top: 16px; }
++    .equipment input { width: 100%; padding: 10px; font: inherit; border: 1px solid #89746d; border-radius: 4px; }
++    .equipment button { font: inherit; border: 0; cursor: pointer; }
++    .equipment button:disabled { opacity: .55; cursor: not-allowed; }
++    .equipment :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
++    .permission { display: inline-block; background: #eee7e3; padding: 3px 9px; border-radius: 4px; margin: 10px 0; }
++    .feedback { margin-top: 12px; overflow-wrap: anywhere; }
++    .remediation, #secure-notice { color: #8b2418; margin-top: 10px; }
++
+     .footer-links {
+       margin-bottom: 20px;
+     }
+@@ -195,6 +206,36 @@
+         </div>
+       </div>
+     </section>
++    <section class="equipment" aria-labelledby="equipment-title">
++      <h2 id="equipment-title">Connect your brewing equipment</h2>
++      <p>Check your Wi-Fi brewer or the brewing utility on this computer. Each connection needs its own browser permission. We only request status; we never start a brew.</p>
++      <p id="secure-notice" role="status" hidden>Equipment connections require this page to be served over HTTPS. Open the secure version of this site to connect.</p>
++      <div class="grid">
++        <form class="card" id="brewer-form">
++          <h3>Wi-Fi coffee brewer</h3>
++          <p>Allow Local network access to read the brewer’s status on your Wi-Fi network.</p>
++          <p class="permission">Permission: <span id="brewer-permission">Checking…</span></p>
++          <label for="brewer-url">Brewer status URL</label>
++          <input id="brewer-url" type="url" value="http://192.168.1.100:8080/api/status" required aria-describedby="brewer-help">
++          <p id="brewer-help">Enter your brewer’s HTTP or HTTPS status endpoint, such as a private IP or brewer.local.</p>
++          <p class="remediation" id="brewer-remediation" hidden>Open this site’s browser Site settings, allow Local network access, then try again.</p>
++          <button class="btn" type="submit" disabled>Connect brewer</button>
++          <p class="feedback" id="brewer-feedback" role="status" aria-live="polite">Checking browser permissions…</p>
++        </form>
++        <form class="card" id="companion-form">
++          <h3>Companion brewing utility</h3>
++          <p>Allow Loopback network access to check the utility running on this computer.</p>
++          <p class="permission">Permission: <span id="companion-permission">Checking…</span></p>
++          <label for="companion-url">Companion health URL</label>
++          <input id="companion-url" type="url" value="http://127.0.0.1:45678/health" required aria-describedby="companion-help">
++          <p id="companion-help">Use localhost, a 127.x.x.x address, or [::1], with your utility’s port and health path.</p>
++          <p class="remediation" id="companion-remediation" hidden>Open this site’s browser Site settings, allow Loopback network access, then try again.</p>
++          <button class="btn" type="submit" disabled>Connect utility</button>
++          <p class="feedback" id="companion-feedback" role="status" aria-live="polite">Checking browser permissions…</p>
++        </form>
++      </div>
++      <p>Connection troubleshooting: keep the brewer powered on and on the same network, or start the companion utility. Both services must allow this site’s origin through standard CORS. Browser support varies; permission prompts may appear when you connect.</p>
++    </section>
+   </main>
+ 
+   <footer>
+@@ -207,6 +248,7 @@
+     <p>&copy; 2026 The Daily Grind Coffee Co. All rights reserved.</p>
+   </footer>
+ 
++  <script type="module" src="./equipment.js"></script>
+ </body>
+ 
+ </html>
+diff --git a/package.json b/package.json
+index 2bd4d77..3dfa3fa 100644
+--- a/package.json
++++ b/package.json
+@@ -2,9 +2,13 @@
+   "name": "daily-grind",
+   "version": "1.0.0",
+   "scripts": {
++    "build": "tsc && node build.mjs",
+     "start": "pnpm dlx statikk --port ${PORT:-11222}"
+   },
+   "pnpm": {
+     "onlyBuiltDependencies": []
++  },
++  "devDependencies": {
++    "typescript": "^7.0.2"
+   }
+ }
+diff --git a/tsconfig.json b/tsconfig.json
+new file mode 100644
+index 0000000..117cdab
+--- /dev/null
++++ b/tsconfig.json
+@@ -0,0 +1,11 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "module": "ES2022",
++    "lib": ["ES2022", "DOM"],
++    "strict": true,
++    "outDir": "dist",
++    "noEmitOnError": true
++  },
++  "include": ["equipment.ts"]
++}

@@ -1,0 +1,6 @@
+# All reviewer requests (both Content ATLs in .github/atls.json and infra/eval
+# owners in src/ci/reviewer-routing.ts) are routed by src/ci/atl-triage.ts AFTER PR
+# intake checks pass (approved issue + Google CLA), so external drive-by PRs do
+# not page maintainers at PR creation time.
+#
+# Note: require_code_owner_review is disabled in the `main` branch ruleset.

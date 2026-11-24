@@ -1,0 +1,240 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..849ddff
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++dist/
+diff --git a/build.mjs b/build.mjs
+new file mode 100644
+index 0000000..a571d44
+--- /dev/null
++++ b/build.mjs
+@@ -0,0 +1,6 @@
++import { execFileSync } from 'node:child_process';
++import { mkdir, copyFile } from 'node:fs/promises';
++
++execFileSync(process.execPath, ['--check', 'seasonal.js'], { stdio: 'inherit' });
++await mkdir('dist', { recursive: true });
++await Promise.all(['index.html', 'seasonal.js'].map(file => copyFile(file, `dist/${file}`)));
+diff --git a/index.html b/index.html
+index 66c9173..89064e3 100644
+--- a/index.html
++++ b/index.html
+@@ -100,13 +100,97 @@
+       padding: 0 20px;
+     }
+ 
+-    .grid {
+-      display: grid;
+-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+-      gap: 20px;
++    .seasonal-slides {
++      max-width: 540px;
++      margin: 20px auto 0;
++    }
++
++    .card[hidden] {
++      display: none;
++    }
++
++    .card:not([hidden]) {
++      view-transition-name: seasonal-card;
++    }
++
++    .seasonal-controls {
++      display: flex;
++      justify-content: center;
++      align-items: center;
++      gap: 16px;
+       margin-top: 20px;
+     }
+ 
++    .seasonal-controls button {
++      margin: 0;
++      border: 0;
++      font: inherit;
++      cursor: pointer;
++    }
++
++    .seasonal-controls button:disabled {
++      opacity: 0.5;
++      cursor: default;
++    }
++
++    .seasonal-controls button:focus-visible {
++      outline: 3px solid var(--accent);
++      outline-offset: 3px;
++    }
++
++    @keyframes slide-to-left {
++      to { transform: translateX(-100%); opacity: 0; }
++    }
++
++    @keyframes slide-from-right {
++      from { transform: translateX(100%); opacity: 0; }
++    }
++
++    @keyframes slide-to-right {
++      to { transform: translateX(100%); opacity: 0; }
++    }
++
++    @keyframes slide-from-left {
++      from { transform: translateX(-100%); opacity: 0; }
++    }
++
++    ::view-transition-group(seasonal-card) {
++      animation-duration: 0.4s;
++      animation-timing-function: ease-in-out;
++    }
++
++    ::view-transition-old(seasonal-card),
++    ::view-transition-new(seasonal-card) {
++      animation-duration: 0.4s;
++      animation-timing-function: ease-in-out;
++      animation-fill-mode: both;
++      mix-blend-mode: normal;
++    }
++
++    html:active-view-transition-type(forward)::view-transition-old(seasonal-card) {
++      animation-name: slide-to-left;
++    }
++
++    html:active-view-transition-type(forward)::view-transition-new(seasonal-card) {
++      animation-name: slide-from-right;
++    }
++
++    html:active-view-transition-type(backward)::view-transition-old(seasonal-card) {
++      animation-name: slide-to-right;
++    }
++
++    html:active-view-transition-type(backward)::view-transition-new(seasonal-card) {
++      animation-name: slide-from-left;
++    }
++
++    @media (prefers-reduced-motion: reduce) {
++      ::view-transition-group(*),
++      ::view-transition-old(*),
++      ::view-transition-new(*) {
++        animation: none !important;
++      }
++    }
++
+     .card {
+       background: white;
+       padding: 20px;
+@@ -175,25 +259,30 @@
+   </header>
+ 
+   <main class="container">
+-    <section>
+-      <h2 style="text-align: center;">Seasonal Favorites</h2>
+-      <div class="grid">
++    <section aria-labelledby="seasonal-heading" aria-roledescription="carousel">
++      <h2 id="seasonal-heading" style="text-align: center;">Seasonal Favorites</h2>
++      <div class="seasonal-slides" id="seasonal-slides">
+         <div class="card">
+           <h3>Maple Oat Latte</h3>
+           <p>Creamy oat milk with a hint of Vermont maple syrup.</p>
+           <a href="/menu/seasonal" class="btn">View Details</a>
+         </div>
+-        <div class="card">
++        <div class="card" hidden>
+           <h3>Dark Roast Espresso</h3>
+           <p>Bold, smokey, and perfect for a morning boost.</p>
+           <a href="/menu/espresso" class="btn">View Details</a>
+         </div>
+-        <div class="card">
++        <div class="card" hidden>
+           <h3>Cold Brew</h3>
+           <p>Steeped for 18 hours for maximum smoothness.</p>
+           <a href="/menu/cold-brew" class="btn">View Details</a>
+         </div>
+       </div>
++      <div class="seasonal-controls">
++        <button type="button" class="btn" id="seasonal-previous" aria-controls="seasonal-slides" disabled>Previous</button>
++        <span id="seasonal-status" role="status" aria-atomic="true">1 of 3: Maple Oat Latte</span>
++        <button type="button" class="btn" id="seasonal-next" aria-controls="seasonal-slides">Next</button>
++      </div>
+     </section>
+   </main>
+ 
+@@ -207,6 +296,7 @@
+     <p>&copy; 2026 The Daily Grind Coffee Co. All rights reserved.</p>
+   </footer>
+ 
++  <script src="seasonal.js" defer></script>
+ </body>
+ 
+ </html>
+diff --git a/package.json b/package.json
+index 2bd4d77..5c14ac8 100644
+--- a/package.json
++++ b/package.json
+@@ -2,6 +2,7 @@
+   "name": "daily-grind",
+   "version": "1.0.0",
+   "scripts": {
++    "build": "node build.mjs",
+     "start": "pnpm dlx statikk --port ${PORT:-11222}"
+   },
+   "pnpm": {
+diff --git a/seasonal.js b/seasonal.js
+new file mode 100644
+index 0000000..6caa517
+--- /dev/null
++++ b/seasonal.js
+@@ -0,0 +1,53 @@
++// Keep navigation bounded and serialize transitions so snapshots stay consistent.
++const cards = Array.from(document.querySelectorAll('#seasonal-slides .card'));
++const previous = document.getElementById('seasonal-previous');
++const next = document.getElementById('seasonal-next');
++const status = document.getElementById('seasonal-status');
++
++if (previous instanceof HTMLButtonElement && next instanceof HTMLButtonElement && status && cards.length) {
++  let current = 0;
++  let busy = false;
++
++  const updateControls = () => {
++    previous.disabled = busy || current === 0;
++    next.disabled = busy || current === cards.length - 1;
++  };
++
++  const navigate = async (direction) => {
++    const target = current + (direction === 'forward' ? 1 : -1);
++    if (busy || target < 0 || target >= cards.length) return;
++
++    let updated = false;
++    const update = () => {
++      if (updated) return;
++      cards[current].hidden = true;
++      cards[target].hidden = false;
++      current = target;
++      status.textContent = `${current + 1} of ${cards.length}: ${cards[current].querySelector('h3')?.textContent ?? ''}`;
++      updated = true;
++    };
++
++    busy = true;
++    updateControls();
++    try {
++      if (typeof document.startViewTransition === 'function'
++        && CSS.supports('selector(:active-view-transition-type(forward))')
++        && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
++        const transition = document.startViewTransition({ update, types: [direction] });
++        await transition.finished;
++      } else {
++        update();
++      }
++    } catch {
++      // A failed or skipped snapshot must never prevent navigation.
++      update();
++    } finally {
++      busy = false;
++      updateControls();
++    }
++  };
++
++  previous.addEventListener('click', () => { void navigate('backward'); });
++  next.addEventListener('click', () => { void navigate('forward'); });
++  updateControls();
++}

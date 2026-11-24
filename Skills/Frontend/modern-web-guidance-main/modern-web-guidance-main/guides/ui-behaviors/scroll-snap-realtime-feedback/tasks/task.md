@@ -1,0 +1,1 @@
+- Add a photo carousel with id 'gallery' and 'gallery-item' slides above seasonal favorites in Daily Grind, providing thumbnail button indicators that preview snap targets with 'pending' mid-scroll, promote to 'active' on settle, and support fallback detection.

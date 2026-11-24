@@ -1,0 +1,1 @@
+- Add smooth page transitions when navigating between The DevTools Times homepage, category pages, and article pages, ensuring the visible page content is stable and visually complete before the transition animates without flashing unstyled or incomplete layouts.

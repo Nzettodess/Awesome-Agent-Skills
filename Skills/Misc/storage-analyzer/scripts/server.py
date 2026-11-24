@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
-"""Serve the storage report with a guarded one-click delete API (macOS + Windows).
+"""Serve the storage report with a guarded one-click delete API (macOS + Windows + Linux).
 
 Starts on 127.0.0.1 + a random port + a random per-session token, serves the
-interactive report, and exposes POST /action to move green-tier paths to Trash
-or delete them outright. Stop with Ctrl+C.
+interactive report, and exposes POST /action for the report's permitted actions.
+Stop with Ctrl+C; the server also exits after 30 minutes of inactivity.
 
 Usage:
     server.py <analysis.json>
 
 SAFETY MODEL — read before changing:
-- Allowlist: only paths listed in this report's green items `trash_paths` are
-  accepted. Every request path is realpath-resolved and must be in the allowlist
-  AND under $HOME. Anything else is rejected. This is the core guard — the
-  endpoint cannot be used to delete arbitrary files.
+- Allowlists: green `trash_paths` permit deletion or Trash; yellow `trash_paths`
+  permit Trash only. Deletion targets must be inside HOME and cannot be protected
+  data roots, links, Git workspaces, or their parent/child directories. Opening
+  report-listed apps additionally permits the platform application directories.
 - Bound to 127.0.0.1 only; every POST requires the session token; Host header
   must be 127.0.0.1 (blocks DNS-rebinding from a malicious page).
-- Two modes: "trash" (Finder -> Trash, reversible) and "rm" (immediate,
+- Two modes: "trash" (Finder / gio -> Trash, reversible) and "rm" (immediate,
   irreversible). The browser confirms each action before sending.
+- Item flag "clear_contents": approved directory is emptied child-by-child and
+  the directory itself is kept, so symlinks pointing at it (e.g. ~/.cache ->
+  ~/.dev-cache/cache) never dangle. Without the flag a directory is removed
+  whole (original behaviour).
 """
 import json
 import os
 import secrets
+import stat
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -32,6 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(HERE, "..", "assets", "report_template.html")
 HOME = os.path.realpath(os.path.expanduser("~"))
 TOKEN = secrets.token_urlsafe(24)
+LAST_ACTIVITY = time.monotonic()
 
 DATA = {}
 TPL = ""
@@ -40,28 +47,39 @@ TRASH_ALLOW = set()
 OPEN_ALLOW = set()
 
 
+CLEAR_CONTENTS = set()  # realpath'd dirs whose CONTENTS are cleared, dir kept
+
+
 def expand(p):
     return os.path.realpath(os.path.expanduser(p))
 
 
 def load(src):
-    with open(src, encoding="utf-8") as f:
+    with open(src, encoding="utf-8-sig") as f:
         data = json.load(f)
-    with open(TEMPLATE, encoding="utf-8") as f:
+    with open(TEMPLATE, encoding="utf-8-sig") as f:
         tpl = f.read()
     # 三套白名单，权限从严到宽：
     #   rm    = 仅绿灯 trash_paths（可直接删的纯缓存）
     #   trash = 绿灯 + 橙灯 trash_paths（橙灯只准移废纸篓，不准直接删）
     #   open  = trash 全集 + 橙灯 path + 红灯 app_paths（仅"在文件管理器打开"，非破坏性）
+    # clear_contents: 带该标志的条目，删除时只清目录内容、保留目录本身。
     rm_allow, trash_allow, open_allow = set(), set(), set()
+    CLEAR_CONTENTS.clear()
     for it in data.get("green", []):
+        clear = bool(it.get("clear_contents"))
         for p in (it.get("trash_paths") or []):
             rp = expand(p)
             rm_allow.add(rp); trash_allow.add(rp); open_allow.add(rp)
+            if clear:
+                CLEAR_CONTENTS.add(rp)
     for it in data.get("yellow", []):
+        clear = bool(it.get("clear_contents"))
         for p in (it.get("trash_paths") or []):
             rp = expand(p)
             trash_allow.add(rp); open_allow.add(rp)
+            if clear:
+                CLEAR_CONTENTS.add(rp)
         if it.get("path"):
             rp = expand(it["path"])
             if os.path.exists(rp):
@@ -75,13 +93,30 @@ def load(src):
     return data, tpl, rm_allow, trash_allow, open_allow
 
 
+def clear_contents(directory, action):
+    """Apply `action` to every child of `directory`, keeping the directory.
+
+    The directory may be referenced by symlinks (e.g. ~/.cache ->
+    ~/.dev-cache/cache); removing it whole would leave them dangling. Children
+    are enumerated with scandir (hidden files included) and each is passed to
+    `action` unchanged — links stay links (never followed), matching
+    hard_delete/move_to_trash semantics.
+    """
+    for entry in sorted(os.scandir(directory), key=lambda e: e.name):
+        if not os.path.lexists(entry.path):
+            continue
+        action(entry.path)
+
+
 def move_to_trash(path):
     if sys.platform == "darwin":
         _trash_macos(path)
     elif sys.platform.startswith("win"):
         _trash_windows(path)
+    elif sys.platform.startswith("linux"):
+        _trash_linux(path)
     else:
-        raise OSError("移到废纸篓仅支持 macOS / Windows")
+        raise OSError("移到废纸篓仅支持 macOS / Windows / Linux")
 
 
 def _trash_macos(path):
@@ -97,7 +132,7 @@ def _trash_macos(path):
 
 def _trash_windows(path):
     # Send to Recycle Bin via SHFileOperationW with FOF_ALLOWUNDO (stdlib ctypes).
-    # UNTESTED on this build — verify on a real Windows machine.
+    # CI cannot click the desktop Recycle Bin; verify that part on a real Windows machine.
     import ctypes
     from ctypes import wintypes
 
@@ -122,15 +157,86 @@ def _trash_windows(path):
     op.pFrom = os.path.abspath(path) + "\x00\x00"  # double-null terminated list
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
     rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
-    if rc != 0:
+    if op.fAnyOperationsAborted:
+        raise OSError("回收站操作已取消，未完成")
+    if rc != 0 and not (rc == 2 and not os.path.exists(path)):
         raise OSError("SHFileOperation failed (code %d)" % rc)
 
 
-def hard_delete(path):
-    if os.path.isdir(path) and not os.path.islink(path):
-        shutil.rmtree(path)
+def _trash_linux(path):
+    # gio trash -> XDG trash (~/.local/share/Trash), recoverable. Needs GIO
+    # (GNOME and most desktops ship it); falls back to trash-cli's `trash`.
+    if shutil.which("gio"):
+        r = subprocess.run(["gio", "trash", path], capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+        err = (r.stderr or r.stdout or "").strip()
+    elif shutil.which("trash"):
+        r = subprocess.run(["trash", path], capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+        err = (r.stderr or "").strip()
     else:
-        os.remove(path)
+        err = "未找到 gio 或 trash 命令"
+    raise OSError(err or "gio trash 失败")
+
+
+def is_link(path):
+    st = os.lstat(path)
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) in (0xA0000003, 0xA000000C)
+
+
+def validate_path(path, mode, allow):
+    raw = os.path.abspath(os.path.expanduser(path))
+    rp = expand(path)
+    if rp not in allow:
+        raise ValueError("路径不在白名单：" + path)
+    roots = [HOME]
+    if mode == "open":
+        if sys.platform == "darwin":
+            roots.append("/Applications")
+        elif sys.platform.startswith("win"):
+            roots.extend(os.path.realpath(os.environ[k]) for k in ("ProgramFiles", "ProgramFiles(x86)") if k in os.environ)
+    if not any(rp == base or rp.startswith(base + os.sep) for base in roots):
+        raise ValueError("路径越界：" + path)
+    if mode != "open":
+        protected = {HOME, os.path.join(HOME, "Library"), os.path.join(HOME, "AppData")}
+        if rp in protected or (os.path.lexists(raw) and is_link(raw)):
+            raise ValueError("不能清理主目录、数据根目录或链接：" + path)
+        # A git checkout/worktree is not disposable cache, including its children.
+        if any((parent / ".git").exists() or parent.name == ".git" for parent in (Path(rp), *Path(rp).parents)):
+            raise ValueError("项目或工作区请使用项目自身的清理流程：" + path)
+        def fail(error):
+            raise error
+        if os.path.isdir(rp):
+            for base, dirs, files in os.walk(rp, followlinks=False, onerror=fail):
+                if ".git" in dirs or ".git" in files:
+                    raise ValueError("目录包含项目或工作区：" + path)
+                dirs[:] = [d for d in dirs if not is_link(os.path.join(base, d))]
+    return rp
+
+
+def hard_delete(path):
+    def readonly_retry(func, target, exc_info):
+        if not isinstance(exc_info[1], PermissionError):
+            raise exc_info[1]
+        if is_link(target):
+            raise exc_info[1]
+        os.chmod(target, os.stat(target).st_mode | stat.S_IWUSR)
+        func(target)
+    if os.path.isdir(path) and not is_link(path):
+        # Go caches contain read-only directories; unlink requires a writable parent.
+        def fail(error):
+            raise error
+        for base, dirs, files in os.walk(path, followlinks=False, onerror=fail):
+            os.chmod(base, os.stat(base).st_mode | stat.S_IRWXU)
+            dirs[:] = [d for d in dirs if not is_link(os.path.join(base, d))]
+        shutil.rmtree(path, onerror=readonly_retry)
+    else:
+        try:
+            os.remove(path)
+        except PermissionError:
+            readonly_retry(os.remove, path, sys.exc_info())
 
 
 def open_in_file_manager(path):
@@ -152,8 +258,12 @@ def open_in_file_manager(path):
                 raise OSError((r.stderr or r2.stderr or "open 失败").strip())
     elif sys.platform.startswith("win"):
         subprocess.run(["explorer", target])  # explorer 退出码不可靠，不据此判成败
+    elif sys.platform.startswith("linux"):
+        r = subprocess.run(["xdg-open", target], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise OSError((r.stderr or "xdg-open 失败").strip())
     else:
-        raise OSError("打开文件夹仅支持 macOS / Windows")
+        raise OSError("打开文件夹仅支持 macOS / Windows / Linux")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -168,9 +278,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def valid_host(self):
+        global LAST_ACTIVITY
+        host = (self.headers.get("Host") or "").split(":")[0]
+        if host not in ("127.0.0.1", "localhost"):
+            self._send(403, json.dumps({"ok": False, "error": "host 不被允许"}))
+            return False
+        LAST_ACTIVITY = time.monotonic()
+        return True
+
     def do_GET(self):
+        if not self.valid_host():
+            return
         if self.path in ("/", "/index.html"):
-            blob = json.dumps(DATA, ensure_ascii=False)
+            blob = json.dumps(DATA, ensure_ascii=False).replace("<", "\\u003c")
             cfg = json.dumps({"token": TOKEN, "endpoint": "/action"})
             html = TPL.replace("__REPORT_DATA__", blob).replace("__DELETE_CONFIG__", cfg)
             self._send(200, html, "text/html; charset=utf-8")
@@ -181,16 +302,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/action":
             self._send(404, json.dumps({"ok": False, "error": "not found"}))
             return
-        # DNS-rebinding guard: only accept local Host
-        host = (self.headers.get("Host") or "").split(":")[0]
-        if host not in ("127.0.0.1", "localhost"):
-            self._send(403, json.dumps({"ok": False, "error": "host 不被允许"}))
+        if not self.valid_host():
             return
-        n = int(self.headers.get("Content-Length", 0))
         try:
+            n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             self._send(400, json.dumps({"ok": False, "error": "请求格式错误"}))
+            return
+        if not isinstance(req, dict):
+            self._send(400, json.dumps({"ok": False, "error": "请求必须是对象"}))
             return
         if req.get("token") != TOKEN:
             self._send(403, json.dumps({"ok": False, "error": "token 校验失败"}))
@@ -200,29 +321,35 @@ class Handler(BaseHTTPRequestHandler):
         if allow is None:
             self._send(400, json.dumps({"ok": False, "error": "未知操作"}))
             return
+        paths = req.get("paths")
+        if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
+            self._send(400, json.dumps({"ok": False, "error": "paths 必须是非空路径数组"}))
+            return
+        try:
+            resolved = [validate_path(p, mode, allow) for p in paths]
+        except (ValueError, OSError) as e:
+            self._send(403, json.dumps({"ok": False, "error": str(e)}))
+            return
         done = []
-        for p in (req.get("paths") or []):
-            rp = expand(p)
-            if rp not in allow:
-                self._send(403, json.dumps({"ok": False, "error": "路径不在白名单：%s" % p}))
-                return
-            # 二级护栏：只允许用户目录或 /Applications（后者仅 open 用，删除白名单不含它）
-            roots = (HOME, "/Applications")
-            if not any(rp == base or rp.startswith(base + os.sep) for base in roots):
-                self._send(403, json.dumps({"ok": False, "error": "路径越界：%s" % p}))
-                return
+        for p, rp in zip(paths, resolved):
             try:
                 if mode == "open":
                     open_in_file_manager(rp)
                 elif not os.path.exists(rp):
                     pass  # already gone, treat as success
                 elif mode == "trash":
-                    move_to_trash(rp)
+                    if rp in CLEAR_CONTENTS and os.path.isdir(rp):
+                        clear_contents(rp, move_to_trash)
+                    else:
+                        move_to_trash(rp)
                 else:
-                    hard_delete(rp)
+                    if rp in CLEAR_CONTENTS and os.path.isdir(rp):
+                        clear_contents(rp, hard_delete)
+                    else:
+                        hard_delete(rp)
                 done.append(p)
             except Exception as e:
-                self._send(500, json.dumps({"ok": False, "error": str(e)}))
+                self._send(500, json.dumps({"ok": False, "error": str(e), "done": done}))
                 return
         self._send(200, json.dumps({"ok": True, "done": done}))
 
@@ -236,14 +363,18 @@ def main():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = srv.server_address[1]
     url = "http://127.0.0.1:%d/" % port
-    print("报告服务已启动：" + url)
+    print("报告服务已启动：" + url, flush=True)
     print("绿灯可删 %d 项 | 橙灯可移废纸篓/打开文件夹 %d 项 | 页面上点" % (len(RM_ALLOW), len(TRASH_ALLOW) - len(RM_ALLOW)))
-    print("用完按 Ctrl+C 停止服务（服务关掉后按钮即失效）")
+    print("用完按 Ctrl+C 停止；连续 30 分钟无请求自动退出。", flush=True)
     webbrowser.open(url)
+    srv.timeout = 1
     try:
-        srv.serve_forever()
+        while time.monotonic() - LAST_ACTIVITY < 1800:
+            srv.handle_request()
     except KeyboardInterrupt:
         print("\n已停止服务。")
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":

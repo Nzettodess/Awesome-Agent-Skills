@@ -1,0 +1,6 @@
+- The text color of themed elements computes to either `rgb(0, 0, 0)` or `rgb(255, 255, 255)` when a background color is applied.
+- The computed text color has a contrast ratio of at least 4.5:1 against the computed background color.
+- When the background color custom property is updated (including across theme or interaction states), the computed text color automatically updates via `contrast-color()` without hard-coding a separate static text color on interaction states.
+- If the browser does not support `contrast-color()`, the themed element still has a readable fallback text color (not the browser default).
+- For variable background colors in browsers that do not support `contrast-color()`, the themed element uses Relative Color Syntax (`oklch(from ...)`), a `text-shadow`, a `-webkit-text-stroke` with `paint-order: stroke fill`, a translucent background overlay, or an SVG filter.
+- The `contrast-color()` function is not used to define the `background-color` property of any element.

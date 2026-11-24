@@ -1,0 +1,10 @@
+- The `:root` or a parent element has `interpolate-size: allow-keywords` applied to enable intrinsic keyword interpolation globally.
+- The interactive element (e.g., accordion, menu) has a `transition` property for logical properties (`block-size`, `inline-size`) or physical properties (`height`, `width`), rather than max-sizing properties.
+- Expansion MUST be triggered using intrinsic keywords rather than fixed magic-number hacks.
+- `max-height` or `max-block-size` magic-number hacks MUST NOT be used in the stylesheets.
+- If `calc-size()` is used, it follows the correct syntax `calc-size(<basis>, <calculation>)`.
+- The implementation provides a clear interaction (e.g., a checkbox, button, or hover) to trigger the size change.
+- The implementation includes a dismissible element (e.g., an alert) that starts at an intrinsic size (`auto`) and collapses to `0` when dismissed.
+- Elements collapsed to zero dimensions MUST be programmatically hidden from assistive technologies (e.g., setting `hidden = true` or `aria-hidden="true"`) upon transition completion.
+- Buttons controlling collapsible or expandable panels MUST dynamically synchronize their `aria-expanded` attribute.
+- Sizing transitions MUST be disabled when `prefers-reduced-motion: reduce` is active.

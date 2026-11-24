@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  basics:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Needed for tag history
+          fetch-depth: 0
+      - run: git fetch --tags
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+
+      - name: Preflight (Typecheck, Lint, Tests)
+        env:
+          TEST_REPORTER: spec
+        run: pnpm run preflight
+
+      - name: Verify publish-skills (Dry Run)
+        run: pnpm run publish-skills --dry-run
+
+      - name: Build DevSite target
+        run: pnpm run build:devsite
+
+      - name: RAG Benchmark (Public Datasets)
+        run: |
+          pnpm run benchmark:rag --public-only --markdown /tmp/rag-bench-ci.md
+          if [ -f /tmp/rag-bench-ci.md ]; then
+            cat /tmp/rag-bench-ci.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+
+      - name: Compare built (post-macro) guides 
+        env:
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+        run: |
+          pnpm run build
+          REPORT_OUTPUT_PATH=/tmp/built-guides-diff.md node src/build/compare-built-guides.ts --base-ref "origin/${BASE_REF}"
+          if [ -f /tmp/built-guides-diff.md ]; then
+            cat /tmp/built-guides-diff.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Fail if any changes were written to any source files or generated untracked files
+      - run: git add -A && git diff --cached --exit-code
+
+  browser:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: git fetch --tags
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(pnpm list --depth 0 playwright --json | jq -r '.[0].devDependencies.playwright.version')" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright Browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright Browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm run setup:playwright --with-deps
+
+      - name: Install Playwright System Dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps
+
+      - name: Playwright E2E Tests
+        run: pnpm run test:e2e
+
+      - name: Browser-backed unit tests
+        timeout-minutes: 10
+        run: node --test src/grading/test-fixture.test.ts
+
+      - name: Test Grader Calibration
+        # Ensuring playwright is happy
+        run: node bin/gd.ts dev guides/ui-behaviors/directional-navigation-transitions/ --test-grader

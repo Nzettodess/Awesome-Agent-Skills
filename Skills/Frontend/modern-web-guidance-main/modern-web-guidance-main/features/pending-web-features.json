@@ -1,0 +1,62 @@
+{
+  "tmp-cross-origin-storage": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4029",
+    "compat_features": "api.Navigator.crossOriginStorage"
+  },
+  "tmp-email-verification": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4439",
+    "group": "security",
+    "compat_features": "html.elements.input.autocomplete.email-verification-token"
+  },
+  "tmp-aria-actions": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4108",
+    "compat_features": "api.Element.ariaActionsElements"
+  },
+  "tmp-webcrypto-modern-algos": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4267",
+    "group": "security",
+    "compat_features": "api.SubtleCrypto.encapsulateKey"
+  },
+  "tmp-media-playback-while-not-visible": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4292",
+    "compat_features": "html.elements.iframe.allow.media-playback-while-not-visible"
+  },
+  "tmp-calc-dimensions": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4196",
+    "group": "css",
+    "compat_features": [
+      "css.types.calc.typed_division_produces_unitless_number",
+      "css.types.sign.typed_division_produces_unitless_number"
+    ]
+  },
+  "tmp-long-animation-frames-style-layout": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4453",
+    "compat_features": "api.PerformanceLongAnimationFrameTiming.styleDuration"
+  },
+  "tmp-path-length": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4307",
+    "group": "css",
+    "compat_features": "css.properties.path-length"
+  },
+  "tmp-text-decoration-inset": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4462",
+    "group": "css",
+    "compat_features": "css.properties.text-decoration-inset"
+  },
+  "tmp-camera-microphone": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4199",
+    "group": "html",
+    "compat_features": [
+      "html.elements.camera",
+      "html.elements.microphone"
+    ]
+  },
+  "tmp-customizable-select-listbox": {
+    "issue": "https://github.com/web-platform-dx/web-features/issues/4551",
+    "group": [
+      "forms",
+      "html-elements"
+    ],
+    "compat_features": "css.properties.appearance.base-select.list_box"
+  }
+}

@@ -1,0 +1,1 @@
+- Convert the main section navigation in The DevTools Times (such as switching between Top News, World, Politics, Multimedia, and Reports) into client-side SPA views and optimize view switching so returning to previously visited views is fast by preserving their offscreen DOM state instead of destroying and rebuilding them on every navigation.

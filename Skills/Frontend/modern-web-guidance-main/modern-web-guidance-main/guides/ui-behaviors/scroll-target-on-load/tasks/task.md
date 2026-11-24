@@ -1,0 +1,1 @@
+- Add a vertical scroll container with media cards where a targeted element (give it a class of target) is already scrolled into view on initial load, ensuring images have defined dimensions and no visible scrolling animation occurs.

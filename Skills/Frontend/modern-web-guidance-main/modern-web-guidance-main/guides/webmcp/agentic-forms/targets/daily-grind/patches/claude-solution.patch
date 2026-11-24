@@ -1,0 +1,332 @@
+diff --git a/index.html b/index.html
+index 66c9173..cc1439f 100644
+--- a/index.html
++++ b/index.html
+@@ -135,6 +135,126 @@
+       background: #3e2723;
+     }
+ 
++    /* Coffee Finder */
++    .finder {
++      margin-top: 50px;
++      background: white;
++      padding: 30px;
++      border-radius: 8px;
++      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
++    }
++
++    .finder h2 {
++      text-align: center;
++      margin-bottom: 5px;
++    }
++
++    .finder-intro {
++      text-align: center;
++      margin-bottom: 20px;
++    }
++
++    .finder form {
++      display: grid;
++      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
++      gap: 18px;
++      padding: 15px;
++      border-radius: 8px;
++      transition: outline 0.2s, background-color 0.2s;
++    }
++
++    .field {
++      display: flex;
++      flex-direction: column;
++      gap: 6px;
++    }
++
++    .field label,
++    .finder legend {
++      font-weight: 600;
++      color: var(--primary);
++    }
++
++    .finder input[type="text"],
++    .finder input[type="number"],
++    .finder select {
++      padding: 8px 10px;
++      border: 1px solid var(--secondary);
++      border-radius: 5px;
++      font: inherit;
++    }
++
++    .finder fieldset {
++      border: 1px solid var(--secondary);
++      border-radius: 5px;
++      padding: 8px 12px;
++    }
++
++    .finder fieldset label {
++      margin-right: 12px;
++      font-weight: normal;
++    }
++
++    .checkbox-field {
++      flex-direction: row;
++      align-items: center;
++    }
++
++    .finder-actions {
++      grid-column: 1 / -1;
++      text-align: center;
++    }
++
++    .finder button {
++      background: var(--primary);
++      color: white;
++      border: none;
++      padding: 10px 24px;
++      border-radius: 5px;
++      font: inherit;
++      cursor: pointer;
++      transition: background 0.3s;
++    }
++
++    .finder button:hover {
++      background: #3e2723;
++    }
++
++    .finder-status {
++      text-align: center;
++      margin-top: 15px;
++      font-style: italic;
++    }
++
++    .finder-results {
++      margin-top: 10px;
++    }
++
++    .finder-results .card {
++      text-align: left;
++    }
++
++    .price {
++      font-weight: bold;
++      color: var(--primary);
++    }
++
++    /* WebMCP agent interaction feedback */
++    form:tool-form-active {
++      outline: 2px dashed var(--accent);
++      background-color: rgba(255, 171, 64, 0.08);
++    }
++
++    button:tool-submit-active {
++      outline: 2px dashed #d84315;
++      animation: pulse 2s infinite;
++    }
++
++    @keyframes pulse {
++      0%, 100% { box-shadow: 0 0 0 0 rgba(216, 67, 21, 0.5); }
++      50% { box-shadow: 0 0 0 8px rgba(216, 67, 21, 0); }
++    }
++
+     footer {
+       background: var(--secondary);
+       text-align: center;
+@@ -195,6 +315,57 @@
+         </div>
+       </div>
+     </section>
++
++    <section class="finder" id="coffee-finder" aria-labelledby="finder-heading">
++      <h2 id="finder-heading">Find Your Perfect Cup</h2>
++      <p class="finder-intro">Tell us what you're in the mood for and we'll match you with a drink from our menu.</p>
++
++      <form id="coffee-finder-form"
++            toolname="find-coffee"
++            tooldescription="Search The Daily Grind's drink menu for coffees matching the customer's taste preferences and budget. Returns matching drinks with prices; does not place an order."
++            toolautosubmit>
++        <div class="field">
++          <label for="finder-flavor">Flavor notes</label>
++          <input type="text" id="finder-flavor" name="flavor"
++                 toolparamdescription="Optional keyword describing a desired taste, e.g. chocolate, maple, fruity, smooth">
++        </div>
++
++        <div class="field">
++          <label for="finder-roast">Roast level</label>
++          <select id="finder-roast" name="roast">
++            <option value="any">Any roast</option>
++            <option value="light">Light</option>
++            <option value="medium">Medium</option>
++            <option value="dark">Dark</option>
++          </select>
++        </div>
++
++        <fieldset toolparamdescription="Whether the customer wants a hot or iced drink; choose 'any' if they have no preference">
++          <legend>Temperature</legend>
++          <label><input type="radio" name="temperature" value="any" checked> Any</label>
++          <label><input type="radio" name="temperature" value="hot"> Hot</label>
++          <label><input type="radio" name="temperature" value="iced"> Iced</label>
++        </fieldset>
++
++        <div class="field">
++          <label for="finder-max-price">Max price ($)</label>
++          <input type="number" id="finder-max-price" name="maxPrice" min="1" max="20" step="0.25"
++                 toolparamdescription="Highest price in US dollars the customer is willing to pay, e.g. 5.50. Leave empty for no limit">
++        </div>
++
++        <div class="field checkbox-field">
++          <input type="checkbox" id="finder-dairy-free" name="dairyFree" value="yes">
++          <label for="finder-dairy-free">Dairy-free only</label>
++        </div>
++
++        <div class="finder-actions">
++          <button type="submit">Find My Coffee</button>
++        </div>
++      </form>
++
++      <p class="finder-status" id="finder-status" role="status" aria-live="polite"></p>
++      <div class="grid finder-results" id="finder-results"></div>
++    </section>
+   </main>
+ 
+   <footer>
+@@ -207,6 +378,142 @@
+     <p>&copy; 2026 The Daily Grind Coffee Co. All rights reserved.</p>
+   </footer>
+ 
++  <script>
++    (() => {
++      const MENU = [
++        { name: 'Maple Oat Latte', roast: 'medium', temps: ['hot', 'iced'], price: 5.75, dairyFree: true, notes: ['maple', 'sweet', 'creamy', 'nutty'], description: 'Creamy oat milk with a hint of Vermont maple syrup.' },
++        { name: 'Dark Roast Espresso', roast: 'dark', temps: ['hot'], price: 3.25, dairyFree: true, notes: ['bold', 'smoky', 'chocolate', 'bitter'], description: 'Bold, smokey, and perfect for a morning boost.' },
++        { name: 'Cold Brew', roast: 'medium', temps: ['iced'], price: 4.5, dairyFree: true, notes: ['smooth', 'chocolate', 'low acidity'], description: 'Steeped for 18 hours for maximum smoothness.' },
++        { name: 'Ethiopian Pour-Over', roast: 'light', temps: ['hot'], price: 4.95, dairyFree: true, notes: ['fruity', 'floral', 'citrus', 'bright', 'berry'], description: 'Hand-poured single origin with blueberry and jasmine notes.' },
++        { name: 'Classic Cappuccino', roast: 'dark', temps: ['hot'], price: 4.25, dairyFree: false, notes: ['creamy', 'foamy', 'rich', 'chocolate'], description: 'Equal parts espresso, steamed milk, and velvety foam.' },
++        { name: 'Vanilla Iced Latte', roast: 'medium', temps: ['iced'], price: 5.25, dairyFree: false, notes: ['vanilla', 'sweet', 'creamy'], description: 'Espresso over ice with whole milk and Madagascar vanilla.' },
++        { name: 'Honey Lavender Cortado', roast: 'light', temps: ['hot'], price: 4.75, dairyFree: false, notes: ['floral', 'honey', 'sweet', 'lavender'], description: 'Light roast espresso cut with lavender-honey steamed milk.' },
++        { name: 'Mocha Almond Freddo', roast: 'dark', temps: ['iced'], price: 5.95, dairyFree: true, notes: ['chocolate', 'nutty', 'almond', 'rich'], description: 'Shaken espresso with cocoa and almond milk over ice.' },
++      ];
++
++      const form = document.getElementById('coffee-finder-form');
++      const statusEl = document.getElementById('finder-status');
++      const resultsEl = document.getElementById('finder-results');
++      if (!form || !statusEl || !resultsEl) return;
++
++      const ROASTS = ['any', 'light', 'medium', 'dark'];
++      const TEMPS = ['any', 'hot', 'iced'];
++
++      const readCriteria = (data) => {
++        const errors = [];
++        const flavor = String(data.get('flavor') ?? '').trim().toLowerCase();
++        const roast = String(data.get('roast') ?? 'any');
++        const temperature = String(data.get('temperature') ?? 'any');
++        const maxPriceRaw = String(data.get('maxPrice') ?? '').trim();
++        const dairyFree = data.get('dairyFree') === 'yes';
++
++        if (!ROASTS.includes(roast)) {
++          errors.push({ field: 'roast', message: `must be one of ${ROASTS.join(', ')}` });
++        }
++        if (!TEMPS.includes(temperature)) {
++          errors.push({ field: 'temperature', message: `must be one of ${TEMPS.join(', ')}` });
++        }
++        let maxPrice = null;
++        if (maxPriceRaw !== '') {
++          maxPrice = Number(maxPriceRaw);
++          if (!Number.isFinite(maxPrice) || maxPrice <= 0) {
++            errors.push({ field: 'maxPrice', message: 'must be a positive number of dollars' });
++          }
++        }
++        return { errors, criteria: { flavor, roast, temperature, maxPrice, dairyFree } };
++      };
++
++      const findMatches = ({ flavor, roast, temperature, maxPrice, dairyFree }) =>
++        MENU.filter((drink) =>
++          (roast === 'any' || drink.roast === roast) &&
++          (temperature === 'any' || drink.temps.includes(temperature)) &&
++          (maxPrice === null || drink.price <= maxPrice) &&
++          (!dairyFree || drink.dairyFree) &&
++          (!flavor ||
++            drink.notes.some((note) => note.includes(flavor) || flavor.includes(note)) ||
++            drink.name.toLowerCase().includes(flavor) ||
++            drink.description.toLowerCase().includes(flavor))
++        );
++
++      const formatPrice = (price) => `$${price.toFixed(2)}`;
++
++      const renderResults = (matches) => {
++        resultsEl.replaceChildren(
++          ...matches.map((drink) => {
++            const card = document.createElement('div');
++            card.className = 'card';
++            const title = document.createElement('h3');
++            title.textContent = drink.name;
++            const desc = document.createElement('p');
++            desc.textContent = drink.description;
++            const meta = document.createElement('p');
++            const price = document.createElement('span');
++            price.className = 'price';
++            price.textContent = formatPrice(drink.price);
++            meta.append(price, ` · ${drink.roast} roast · ${drink.temps.join(' or ')}${drink.dairyFree ? ' · dairy-free' : ''}`);
++            card.append(title, desc, meta);
++            return card;
++          })
++        );
++      };
++
++      const summarize = (matches) => {
++        if (matches.length === 0) {
++          return 'No drinks on The Daily Grind menu match those preferences. Try loosening the roast, temperature, price, or flavor filters.';
++        }
++        const lines = matches.map((d) =>
++          `- ${d.name} (${formatPrice(d.price)}; ${d.roast} roast; ${d.temps.join('/')}${d.dairyFree ? '; dairy-free' : ''}): ${d.description}`
++        );
++        return `Found ${matches.length} matching drink${matches.length === 1 ? '' : 's'}:\n${lines.join('\n')}`;
++      };
++
++      form.addEventListener('submit', (event) => {
++        event.preventDefault();
++
++        const { errors, criteria } = readCriteria(new FormData(form));
++
++        if (errors.length > 0) {
++          const errorString = 'Validation failed: ' +
++            errors.map((err) => `${err.field} (${err.message})`).join(', ');
++          statusEl.textContent = errorString;
++          resultsEl.replaceChildren();
++          if (event.agentInvoked) {
++            event.respondWith(Promise.resolve(errorString));
++          }
++          return;
++        }
++
++        const matches = findMatches(criteria);
++        renderResults(matches);
++        statusEl.textContent = matches.length === 0
++          ? 'No matches found — try adjusting your preferences.'
++          : `We found ${matches.length} drink${matches.length === 1 ? '' : 's'} for you.`;
++
++        if (event.agentInvoked) {
++          event.respondWith(Promise.resolve(summarize(matches)));
++        }
++      });
++
++      // WebMCP lifecycle events. Chrome 156+ dispatches on document.modelContext;
++      // older versions dispatch on window.
++      const targetFor = (type, listener, options) =>
++        (`on${type}` in (document.modelContext ?? {}) ? document.modelContext : window)
++          .addEventListener(type, listener, options);
++
++      targetFor('toolactivated', ({ toolName }) => {
++        if (toolName === form.getAttribute('toolname')) {
++          statusEl.textContent = 'Your assistant is searching the menu for you…';
++        }
++      });
++
++      targetFor('toolcancel', ({ toolName }) => {
++        if (toolName === form.getAttribute('toolname')) {
++          statusEl.textContent = 'Search cancelled.';
++        }
++      });
++    })();
++  </script>
++
+ </body>
+ 
+ </html>

@@ -1,0 +1,1 @@
+- Add a mailing list form to the footer with a required email input, displaying error styling and messages only after the user interacts with the field and leaves it empty or attempts to submit the form, keeping empty fields neutral before interaction.

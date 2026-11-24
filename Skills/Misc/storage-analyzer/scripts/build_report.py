@@ -10,11 +10,13 @@ Schema (all sections optional except system):
 {
   "generated_at": "2026-05-28 12:00:00",
   "scan_seconds": 42.1,
-  "system": {os, build, arch, user, home, filesystem,
-             disk_total, disk_used, disk_free, purgeable},
+  "system": scan.py 输出的 system 对象原样照抄，不删字段：
+            {os, build, arch, user, home, filesystem,
+             disk_total, disk_used, disk_free, purgeable,
+             disk_name, disks:[{name,total,used,free}]},
   "top5": [{rank, tier(green|yellow|red), size, type, name, path, note}],
-  "green":  [{name, path, size_estimate, kill_processes:[], trash_paths:[...], commands:[{label,cmd}]}],
-  "yellow": [{name, path, size, content_profile, why_manual, disposal, risk, trash_paths:[...]?, open_note?}],
+  "green":  [{name, path, size_estimate, kill_processes:[], trash_paths:[...], clear_contents?, commands:[{label,cmd}]}],
+  "yellow": [{name, path, size, content_profile, why_manual, disposal, risk, trash_paths:[...]?, clear_contents?, open_note?}],
   "red":    [{name, path, size, why_keep, indirect_release, auto_reclaim, app_paths:[...]?}],
   "denied": ["/path/one", ...],
   "summary": {overview, tier_stats:{green,yellow,red}, priority:[...], long_term:[...]}
@@ -34,14 +36,14 @@ def main():
         sys.exit(1)
     src = sys.argv[1]
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser(
-        "~/Desktop/storage-report.html")
+        "storage-report.html")
 
-    with open(src, "r", encoding="utf-8") as f:
+    with open(src, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
-    with open(TEMPLATE, "r", encoding="utf-8") as f:
+    with open(TEMPLATE, "r", encoding="utf-8-sig") as f:
         tpl = f.read()
 
-    blob = json.dumps(data, ensure_ascii=False)
+    blob = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     # 静态报告不带删除能力（DELETE=null），删除按钮只在 server.py 服务时出现
     html = tpl.replace("__REPORT_DATA__", blob).replace("__DELETE_CONFIG__", "null")
 

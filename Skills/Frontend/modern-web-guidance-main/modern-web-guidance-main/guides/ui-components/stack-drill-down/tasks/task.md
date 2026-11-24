@@ -1,0 +1,1 @@
+- Turn the Daily Grind homepage into a full-screen hierarchical drill-down navigation stack where selecting a Seasonal Favorites item navigates into a detail view and users can swipe or navigate back in sync with browser history and deep links.

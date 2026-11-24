@@ -1,0 +1,261 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..849ddff
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++dist/
+diff --git a/build.mjs b/build.mjs
+new file mode 100644
+index 0000000..43af514
+--- /dev/null
++++ b/build.mjs
+@@ -0,0 +1,7 @@
++import { copyFile, mkdir } from 'node:fs/promises';
++
++await mkdir(new URL('./dist/', import.meta.url), { recursive: true });
++for (const file of ['index.html', 'scrollspy.js']) {
++  await copyFile(new URL(file, import.meta.url), new URL(`./dist/${file}`, import.meta.url));
++}
++console.log('Built static site in dist/');
+diff --git a/index.html b/index.html
+index 66c9173..8dc1e90 100644
+--- a/index.html
++++ b/index.html
+@@ -12,6 +12,7 @@
+       --accent: #ffab40;
+       --text: #3e2723;
+       --light: #fafafa;
++      --nav-height: 80px;
+     }
+ 
+     * {
+@@ -47,12 +48,15 @@
+     }
+ 
+     nav ul {
++      scroll-target-group: auto;
+       display: flex;
++      flex-wrap: wrap;
++      gap: 8px 20px;
+       list-style: none;
+     }
+ 
+     nav ul li {
+-      margin-left: 20px;
++      margin: 0;
+     }
+ 
+     nav a {
+@@ -60,6 +64,28 @@
+       text-decoration: none;
+       font-size: 0.9rem;
+       transition: color 0.3s;
++      border-bottom: 3px solid transparent;
++      padding-bottom: 4px;
++    }
++
++    nav a:is(:target-current, .target-current) {
++      color: var(--accent);
++      border-bottom-color: var(--accent);
++      text-decoration: underline;
++      text-underline-offset: 5px;
++    }
++
++    a:focus-visible {
++      outline: 3px solid var(--accent);
++      outline-offset: 5px;
++    }
++
++    @media (max-width: 760px) {
++      nav {
++        flex-direction: column;
++        align-items: flex-start;
++        gap: 12px;
++      }
+     }
+ 
+     nav a:hover {
+@@ -107,6 +133,17 @@
+       margin-top: 20px;
+     }
+ 
++    main > section {
++      min-height: 75vh;
++      padding: 40px 0;
++      scroll-margin-top: calc(var(--nav-height) + 20px);
++    }
++
++    main h2 {
++      text-align: center;
++      margin-bottom: 20px;
++    }
++
+     .card {
+       background: white;
+       padding: 20px;
+@@ -157,13 +194,13 @@
+ 
+ <body>
+ 
+-  <nav>
++  <nav aria-label="Primary navigation">
+     <div class="logo">THE DAILY GRIND</div>
+     <ul>
+-      <li><a href="/menu">Menu</a></li>
+-      <li><a href="/locations">Locations</a></li>
+-      <li><a href="/rewards">Rewards</a></li>
+-      <li><a href="/account">My Account</a></li>
++      <li><a href="#menu">Menu</a></li>
++      <li><a href="#locations">Locations</a></li>
++      <li><a href="#rewards">Rewards</a></li>
++      <li><a href="#account">My Account</a></li>
+       <li><a href="/logout" class="logout-link">Logout</a></li>
+     </ul>
+   </nav>
+@@ -175,8 +212,9 @@
+   </header>
+ 
+   <main class="container">
+-    <section>
+-      <h2 style="text-align: center;">Seasonal Favorites</h2>
++    <section id="menu" aria-labelledby="menu-heading">
++      <h2 id="menu-heading">Menu</h2>
++      <p>Explore our seasonal favorites, from a comforting latte to a refreshing cold brew.</p>
+       <div class="grid">
+         <div class="card">
+           <h3>Maple Oat Latte</h3>
+@@ -195,6 +233,31 @@
+         </div>
+       </div>
+     </section>
++    <section id="locations" aria-labelledby="locations-heading">
++      <h2 id="locations-heading">Locations</h2>
++      <div class="card">
++        <h3>Find your neighborhood Daily Grind</h3>
++        <p>Stop by for locally roasted coffee, a freshly made drink, and a moment to unwind.</p>
++        <p>Contact our team for café locations, opening hours, and accessibility information.</p>
++        <a href="/contact" class="btn">Contact Us</a>
++      </div>
++    </section>
++    <section id="rewards" aria-labelledby="rewards-heading">
++      <h2 id="rewards-heading">Rewards</h2>
++      <div class="card">
++        <h3>Make your daily ritual more rewarding</h3>
++        <p>Your account is the place to find your rewards and discover offers for your next visit.</p>
++        <a href="#account" class="btn">Explore My Account</a>
++      </div>
++    </section>
++    <section id="account" aria-labelledby="account-heading">
++      <h2 id="account-heading">My Account</h2>
++      <div class="card">
++        <h3>Your coffee, your way</h3>
++        <p>Visit your account to manage your profile and view your rewards.</p>
++        <a href="/account" class="btn">Manage Account</a>
++      </div>
++    </section>
+   </main>
+ 
+   <footer>
+@@ -207,6 +270,7 @@
+     <p>&copy; 2026 The Daily Grind Coffee Co. All rights reserved.</p>
+   </footer>
+ 
++  <script type="module" src="./scrollspy.js"></script>
+ </body>
+ 
+ </html>
+diff --git a/package.json b/package.json
+index 2bd4d77..4a1cb16 100644
+--- a/package.json
++++ b/package.json
+@@ -2,6 +2,7 @@
+   "name": "daily-grind",
+   "version": "1.0.0",
+   "scripts": {
++    "build": "node --check scrollspy.js && node build.mjs",
+     "start": "pnpm dlx statikk --port ${PORT:-11222}"
+   },
+   "pnpm": {
+diff --git a/scrollspy.js b/scrollspy.js
+new file mode 100644
+index 0000000..40ede60
+--- /dev/null
++++ b/scrollspy.js
+@@ -0,0 +1,76 @@
++// @ts-check
++const nav = document.querySelector('nav');
++const links = Array.from(document.querySelectorAll('nav ul a[href^="#"]'))
++  .filter((link) => link instanceof HTMLAnchorElement);
++const sections = links.map(link => document.getElementById(link.hash.slice(1)));
++const nativeTracking = CSS.supports('scroll-target-group: auto') &&
++  CSS.supports('selector(:target-current)');
++
++/** @param {Element | null} current */
++function markCurrent(current) {
++  for (const link of links) {
++    link.setAttribute('aria-current', link === current ? 'true' : 'false');
++    link.classList.toggle('target-current', !nativeTracking && link === current);
++  }
++}
++
++function syncCurrent() {
++  if (nativeTracking) {
++    markCurrent(document.querySelector('nav ul a:target-current'));
++    return;
++  }
++
++  // Select by document order, independent of IntersectionObserver entry order.
++  const readingLine = (nav?.getBoundingClientRect().height ?? 0) + 24;
++  let current = links[0] ?? null;
++  sections.forEach((section, index) => {
++    if (section && section.getBoundingClientRect().top <= readingLine) {
++      current = links[index];
++    }
++  });
++  // The last section may be too short to reach the reading line.
++  if (window.scrollY > 0 && window.innerHeight + window.scrollY >=
++      document.documentElement.scrollHeight - 2) {
++    current = links[links.length - 1] ?? null;
++  }
++  markCurrent(current);
++}
++
++let scheduled = false;
++function scheduleSync() {
++  if (scheduled) return;
++  scheduled = true;
++  requestAnimationFrame(() => {
++    scheduled = false;
++    syncCurrent();
++  });
++}
++
++function updateNavHeight() {
++  document.documentElement.style.setProperty('--nav-height',
++    `${nav?.getBoundingClientRect().height ?? 80}px`);
++  scheduleSync();
++}
++
++if (nav) new ResizeObserver(updateNavHeight).observe(nav);
++updateNavHeight();
++
++if (!nativeTracking) {
++  const observer = new IntersectionObserver(scheduleSync, { threshold: [0, 0.5, 1] });
++  sections.forEach(section => { if (section) observer.observe(section); });
++  document.addEventListener('scroll', scheduleSync, { passive: true });
++} else {
++  // Debouncing also covers browsers without the scrollend event.
++  let scrollTimer = 0;
++  document.addEventListener('scroll', () => {
++    window.clearTimeout(scrollTimer);
++    scrollTimer = window.setTimeout(scheduleSync, 120);
++  }, { passive: true });
++}
++
++document.addEventListener('scrollend', scheduleSync);
++window.addEventListener('hashchange', scheduleSync);
++window.addEventListener('pageshow', scheduleSync);
++window.addEventListener('resize', updateNavHeight);
++window.addEventListener('load', scheduleSync);
++scheduleSync();

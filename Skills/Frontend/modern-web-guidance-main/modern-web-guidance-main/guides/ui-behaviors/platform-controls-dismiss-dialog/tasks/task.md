@@ -1,0 +1,1 @@
+- Update the Seasonal Favorites coffee cards on the Daily Grind homepage so clicking a card's details action opens an accessible modal dialog that users can dismiss using standard platform controls such as pressing Escape on desktop or using the back gesture on mobile.

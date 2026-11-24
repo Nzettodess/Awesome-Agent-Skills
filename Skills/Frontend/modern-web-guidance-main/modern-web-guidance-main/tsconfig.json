@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": true
+  },
+
+  "include": [
+    "bin/**/*",
+    "src/**/*",
+    "guides/**/*",
+    ".agents/skills/coherence-auditor/scripts/coherence-audit.ts",
+    ".agents/skills/grader-replay/scripts/replay.ts"
+  ],
+
+  "exclude": [
+    "**/node_modules",
+    "**/dist",
+    "**/build",
+    "src/dashboard",
+    "src/dashboard/**/*",
+    "src/harness/base-apps/devtools-times/",
+    "src/grading/template.grader.ts",
+    "out",
+    "results",
+    "**/grade-report/**",
+    "**/test-app-results/**",
+    "**/test-results/**"
+  ]
+}

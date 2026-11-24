@@ -1,7 +1,7 @@
 # Windows 数据布局与分级参考
 
 分析 Windows 扫描结果时读这份。讲"东西存在哪、怎么辨认、归哪一级"。
-注意：Windows 代码路径在 macOS 上无法验证，分析时对路径存在性保持谨慎。
+注意：下面的路径是常见位置，不同版本和安装方式会有出入，分析时先确认路径在这台机器上真实存在。
 
 ## 多盘符
 
@@ -31,3 +31,7 @@ Windows 通常多个盘（C:、D:…）。磁盘总览会列出所有盘，但**
 ## 删除机制
 
 `server.py` 在 Windows 用 ctypes 调 `SHFileOperationW`(FOF_ALLOWUNDO) 送进回收站；纯标准库。🟢 项的 `trash_paths` 应在用户配置文件（`%USERPROFILE%`）目录内，便于白名单与 HOME 越界校验通过。
+
+## 联接目录与项目
+
+先用 `Get-Item -Force` 检查 LinkType、Target，junction 不计入实体大小；`.git` 文件也是 worktree 标识。项目和工具安装目录不能仅凭体积大、时间久就列入可清理项。UTF-8 输出在 PowerShell 用 `Out-File -Encoding utf8` 保存。

@@ -1,0 +1,916 @@
+import fs from 'fs';
+import path from 'path';
+import matter from '@11ty/gray-matter';
+import { guidesDir, getGuideResultsDir } from '../core/paths.ts';
+import { gitExec } from '../core/git-utils.ts';
+import { testGrader, runPlaywright, type CalibrationResult } from '../grading/run-grader.ts';
+import { generateTargetGrader } from '../grading/generate-grader.ts';
+import { ensureGuidedEvalDist } from '../harness/lib/eval-dist.ts';
+import { Agents, type SuiteConfig } from '../harness/config.ts';
+import { ensureFreshHostCodexAuth } from '../harness/agents/codex-cli-agent.ts';
+import { collectGuidesUsed } from '../harness/lib/guide-usage.ts';
+import { setupGuideDevWorkDir, runAgent, copyBaseAppToWorkspace } from '../harness/lib/utils.ts';
+import {
+  buildSolutionPrompt,
+  buildZeroPassratePrompt,
+  buildTargetTaskPrompt,
+} from './dev-prompts.ts';
+import { cRed, cGreen, cYellow, cCyan, cBold, cDim } from '../core/colors.ts';
+import { capturePatchFromGit, initGitRepo } from '../core/patch-utils.ts';
+import { findGraderFiles } from '../core/grader-lint.ts';
+import { replaceMacros } from '../core/macros.ts';
+import {
+  type GuideInventory,
+  GUIDE_FILE,
+  DEMO_FILE,
+  EXPECTATIONS_FILE,
+  NEGATIVE_DEMO_FILE,
+  GRADER_FILE,
+  TASK_FILE,
+  REPORT_FILE,
+  TARGETS_DIR,
+  SUPPORTED_BASE_APPS,
+  getDefaultSolutionAgent,
+  getActiveSolutionAgents,
+  SOLUTION_PATCH_FILES,
+  type SolutionAgent,
+  ZERO_PASSRATE_PATCH_FILE,
+  getTaskMap,
+  resetGuidesMap,
+  inventoryGuide,
+  classifyGuide,
+  scanAllGuides,
+  isDisciplineGuide,
+} from '../core/guide-validation.ts';
+import { runDevReport, applyPrReviewFeedback } from './dev-report.ts';
+
+export interface DevGuideOptions {
+  maxRetries?: number;   // default: 2
+  test?: boolean;        // default: true — run agent test after calibration
+  guidedOnly?: boolean;  // skip calibration and only run the guided agent test
+  verbose?: boolean;
+  suiteConfig?: SuiteConfig;
+  targets?: readonly string[];
+  prContext?: {
+    branchCommits?: string;
+    branchDiff?: string;
+    comments?: string;
+    rerunMode?: string;
+  };
+}
+
+export function extractGuideDescription(rawGuideContent: string): string {
+  const { data } = matter(rawGuideContent);
+  const desc = typeof data?.description === 'string' ? data.description.trim() : '';
+  if (!desc) {
+    throw new Error(`Missing or empty 'description' frontmatter in ${GUIDE_FILE}`);
+  }
+  return desc;
+}
+
+function runGitInDir(cwd: string, args: readonly string[]): string {
+  return gitExec(args, { cwd, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+}
+
+export const devCli = {
+  commitStepArtifacts(guideDir: string, commitMessage: string): boolean {
+    try {
+      const branch = runGitInDir('.', ['branch', '--show-current']);
+      if (!branch.startsWith('gd-dev/')) return false;
+
+      const status = runGitInDir('.', ['status', '--porcelain', '--', guideDir]);
+      if (!status) return false;
+
+      runGitInDir('.', ['add', '--', guideDir]);
+      runGitInDir('.', ['commit', '-m', commitMessage]);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
+/**
+ * Returns true if any of `inputs` changed after `outputs` were last written. Committed changes are
+ * ordered by git history (so merges count); uncommitted inputs count as changed when `outputs` are
+ * committed and unmodified. Uncommitted `outputs`, or no git repo, fall back to modification times.
+ */
+export function changedSince(inputs: string[], outputs: string[]): boolean {
+  const ins = inputs.filter(p => fs.existsSync(p));
+  const outs = outputs.filter(p => fs.existsSync(p));
+  if (ins.length === 0 || outs.length === 0) return false;
+
+  const byMtime = () =>
+    Math.max(...ins.map(p => fs.statSync(p).mtimeMs)) > Math.max(...outs.map(p => fs.statSync(p).mtimeMs));
+  const cwd = path.dirname(outs[0]);
+
+  try {
+    const isDirty = (p: string) => runGitInDir(cwd, ['status', '--porcelain', '--', p]) !== '';
+    if (outs.some(isDirty)) return byMtime();
+    if (ins.some(isDirty)) return true;
+    const lastOutputCommit = runGitInDir(cwd, ['log', '-1', '--format=%H', '--', ...outs]);
+    if (!lastOutputCommit) return byMtime();
+    return runGitInDir(cwd, ['rev-list', '--count', `${lastOutputCommit}..HEAD`, '--', ...ins]) !== '0';
+  } catch {
+    return byMtime();
+  }
+}
+
+/**
+ * Batched equivalent of `changedSince([expectationsPath], [targetGraderPath])` across all guides.
+ * Returns normalized repo-relative paths (`guides/<cat>/<name>/targets/<app>/grader.ts`).
+ */
+export function findStaleTargets(repoRootDir: string): Set<string> {
+  const guidesRoot = path.join(repoRootDir, 'guides');
+  const pairs: Array<{ expRel: string; graderRel: string; expAbs: string; graderAbs: string }> = [];
+  for (const graderAbs of findGraderFiles(repoRootDir)) {
+    const relParts = path.relative(guidesRoot, graderAbs).split(path.sep);
+    if (relParts.length !== 5 || relParts[2] !== TARGETS_DIR || relParts.some(p => p.startsWith('.'))) continue;
+    const [cat, guide, , app] = relParts;
+    const expAbs = path.join(guidesRoot, cat, guide, EXPECTATIONS_FILE);
+    if (!fs.existsSync(expAbs)) continue;
+    pairs.push({
+      expRel: `guides/${cat}/${guide}/${EXPECTATIONS_FILE}`,
+      graderRel: `guides/${cat}/${guide}/${TARGETS_DIR}/${app}/${GRADER_FILE}`,
+      expAbs,
+      graderAbs,
+    });
+  }
+  if (pairs.length === 0) return new Set();
+
+  const isNewerMtime = (p: { expAbs: string; graderAbs: string }) =>
+    fs.statSync(p.expAbs).mtimeMs > fs.statSync(p.graderAbs).mtimeMs;
+
+  try {
+    const statusRaw = gitExec(['status', '--porcelain', '-z', '--', 'guides/'], {
+      cwd: repoRootDir,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    const dirtyPaths = new Set<string>();
+    const entries = statusRaw.split('\0');
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry.length < 4) continue;
+      const xy = entry.slice(0, 2);
+      dirtyPaths.add(entry.slice(3));
+      if (xy.includes('R') || xy.includes('C')) {
+        const orig = entries[++i];
+        if (orig) dirtyPaths.add(orig);
+      }
+    }
+
+    const revLines = gitExec(['rev-list', '--topo-order', '--parents', 'HEAD'], {
+      cwd: repoRootDir,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    })
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .reverse();
+
+    const shaToIdx = new Map<string, number>();
+    for (let i = 0; i < revLines.length; i++) {
+      shaToIdx.set(revLines[i].slice(0, 40), i);
+    }
+    const words = Math.ceil(revLines.length / 32);
+    const ancestors: Uint32Array[] = [];
+    for (let i = 0; i < revLines.length; i++) {
+      const bs = new Uint32Array(words);
+      bs[i >>> 5] |= 1 << (i & 31);
+      const line = revLines[i];
+      for (let pos = 41; pos < line.length; pos += 41) {
+        const pIdx = shaToIdx.get(line.slice(pos, pos + 40));
+        if (pIdx !== undefined) {
+          const pBs = ancestors[pIdx];
+          for (let w = 0; w < words; w++) bs[w] |= pBs[w];
+        }
+      }
+      ancestors[i] = bs;
+    }
+
+    const logRaw = gitExec(['log', '--topo-order', '--cc', '--format=COMMIT|%H', '--name-only', '--', 'guides/'], {
+      cwd: repoRootDir,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    const latestGraderCommit = new Map<string, number>();
+    const expCommits = new Map<string, number[]>();
+    for (const block of logRaw.split('\nCOMMIT|')) {
+      const trimmed = block.trim();
+      if (!trimmed) continue;
+      const lines = trimmed.split('\n');
+      const header = lines[0].startsWith('COMMIT|') ? lines[0].slice('COMMIT|'.length) : lines[0];
+      const cIdx = shaToIdx.get(header.slice(0, 40));
+      if (cIdx === undefined) continue;
+      for (let i = 1; i < lines.length; i++) {
+        const file = lines[i].trim();
+        if (!file) continue;
+        if (file.endsWith(`/${GRADER_FILE}`)) {
+          if (!latestGraderCommit.has(file)) latestGraderCommit.set(file, cIdx);
+        } else if (file.endsWith(`/${EXPECTATIONS_FILE}`)) {
+          let list = expCommits.get(file);
+          if (!list) {
+            list = [];
+            expCommits.set(file, list);
+          }
+          list.push(cIdx);
+        }
+      }
+    }
+
+    const stale = new Set<string>();
+    for (const p of pairs) {
+      if (dirtyPaths.has(p.graderRel)) {
+        if (isNewerMtime(p)) stale.add(p.graderRel);
+        continue;
+      }
+      if (dirtyPaths.has(p.expRel)) {
+        stale.add(p.graderRel);
+        continue;
+      }
+      const gIdx = latestGraderCommit.get(p.graderRel);
+      if (gIdx === undefined) {
+        if (isNewerMtime(p)) stale.add(p.graderRel);
+        continue;
+      }
+      const gAnc = ancestors[gIdx];
+      const eList = expCommits.get(p.expRel);
+      if (eList && eList.some(eIdx => (gAnc[eIdx >>> 5] & (1 << (eIdx & 31))) === 0)) {
+        stale.add(p.graderRel);
+      }
+    }
+    return stale;
+  } catch {
+    return new Set(pairs.filter(p => changedSince([p.expAbs], [p.graderAbs])).map(p => p.graderRel));
+  }
+}
+
+function descriptionChangedSince(guidePath: string, outputs: string[]): 'changed' | 'unchanged' | 'unknown' {
+  const outs = outputs.filter(p => fs.existsSync(p));
+  if (outs.length === 0) return 'unknown';
+  const cwd = path.dirname(guidePath);
+
+  try {
+    if (outs.some(p => runGitInDir(cwd, ['status', '--porcelain', '--', p]) !== '')) return 'unknown';
+    const lastOutputCommit = runGitInDir(cwd, ['log', '-1', '--format=%H', '--', ...outs]);
+    if (!lastOutputCommit) return 'unknown';
+    const prevGuide = runGitInDir(cwd, ['show', `${lastOutputCommit}:./${path.basename(guidePath)}`]);
+    return extractGuideDescription(prevGuide) !== extractGuideDescription(fs.readFileSync(guidePath, 'utf-8'))
+      ? 'changed'
+      : 'unchanged';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Deletes the stale artifacts of a target capsule so `devGuide` (which skips files that already
+ * exist) regenerates them, based on what changed since its golden solution patches were generated:
+ * - `guide.md` `description` (or undetermined history): wipe the target and regenerate everything.
+ * - Other `guide.md` / `expectations.md` edits: regenerate all patches (`*-solution.patch` and
+ *   `zero-passrate.patch`) and `grader.ts` (keep `task.md`).
+ * - `task.md`: regenerate the solution patches and `grader.ts` (keep `task.md` and `zero-passrate.patch`).
+ * - Otherwise (e.g. only `grader.ts`): nothing; calibration and evals still run.
+ * Comparing against the solution patches keeps reruns idempotent: once they are regenerated, an
+ * earlier input change no longer counts.
+ */
+export function applyTargetRerun(
+  guideDir: string,
+  targetCapsuleDir: string
+): 'regenerate-all' | 'regenerate-patches' | 'regenerate-solutions' | 'none' {
+  const solutionPatches = Object.values(SOLUTION_PATCH_FILES).map(f => path.join(targetCapsuleDir, f));
+  const target = path.basename(targetCapsuleDir);
+  const guidePath = path.join(guideDir, GUIDE_FILE);
+  if (changedSince([guidePath, path.join(guideDir, EXPECTATIONS_FILE)], solutionPatches)) {
+    const descStatus = descriptionChangedSince(guidePath, solutionPatches);
+    if (descStatus !== 'unchanged') {
+      const reason = descStatus === 'changed'
+        ? `${GUIDE_FILE} description changed since ${target} was generated`
+        : `${GUIDE_FILE} or ${EXPECTATIONS_FILE} changed since ${target} was generated (description history unavailable)`;
+      console.log(cYellow(`\n${reason}; regenerating all ${target} artifacts.`));
+      fs.rmSync(targetCapsuleDir, { recursive: true, force: true });
+      return 'regenerate-all';
+    }
+    console.log(cYellow(`\n${GUIDE_FILE} or ${EXPECTATIONS_FILE} changed since ${target} was generated; keeping ${TASK_FILE} and regenerating ${target} patches and ${GRADER_FILE}.`));
+    for (const f of [...Object.values(SOLUTION_PATCH_FILES), ZERO_PASSRATE_PATCH_FILE, GRADER_FILE]) {
+      fs.rmSync(path.join(targetCapsuleDir, f), { force: true });
+    }
+    return 'regenerate-patches';
+  }
+  if (changedSince([path.join(targetCapsuleDir, TASK_FILE)], solutionPatches)) {
+    console.log(cYellow(`\n${TASK_FILE} changed since the ${target} solution patches were generated; regenerating solution patches and ${GRADER_FILE}.`));
+    for (const f of [...Object.values(SOLUTION_PATCH_FILES), GRADER_FILE]) {
+      fs.rmSync(path.join(targetCapsuleDir, f), { force: true });
+    }
+    return 'regenerate-solutions';
+  }
+  return 'none';
+}
+
+function printInventory(inv: GuideInventory, targets: readonly string[] = SUPPORTED_BASE_APPS): void {
+  const icon = (exists: boolean, willGenerate = false, warn = false) => {
+    if (exists && !warn) return '\u2705';
+    if (warn) return '\u26a0\ufe0f ';
+    if (willGenerate) return '\u2b1c';
+    return '\u274c';
+  };
+
+  console.log(`\n\ud83d\udccb Guide: ${cBold(inv.name)}`);
+  console.log(`   ${GUIDE_FILE.padEnd(18)} ${icon(inv.hasGuide)}`);
+  if (!inv.hasExpectations) {
+    console.log(`   ${EXPECTATIONS_FILE.padEnd(18)} ${icon(false)} ${cDim('missing')}`);
+  } else if (inv.expectationsEmpty) {
+    console.log(`   ${EXPECTATIONS_FILE.padEnd(18)} ${icon(true, false, true)} ${cDim('empty')}`);
+  } else {
+    console.log(`   ${EXPECTATIONS_FILE.padEnd(18)} ${icon(true)}`);
+  }
+
+  if (inv.targets) {
+    console.log(`\n   ${cDim('Targets:')}`);
+    for (const target of inv.targets.filter(t => targets.includes(t.name))) {
+      console.log(`     ${cBold(target.name)}`);
+      console.log(`       ${'solutions/*.patch'.padEnd(18)} ${target.hasSolution ? icon(true) : icon(false, true) + ' will generate'}`);
+      console.log(`       ${'zero-passrate.patch'.padEnd(18)} ${target.hasZeroPassrate ? icon(true) : icon(false, true) + ' will generate'}`);
+      console.log(`       ${'grader.ts'.padEnd(18)} ${target.hasGrader ? icon(true) : icon(false, true) + ' will generate'}`);
+      console.log(`       ${'task.md'.padEnd(18)} ${target.hasTask ? icon(true) : icon(false, true) + ' will generate'}`);
+    }
+  } else {
+    console.log(`   ${DEMO_FILE.padEnd(18)} ${icon(inv.hasDemo)}`);
+    console.log(`   ${NEGATIVE_DEMO_FILE.padEnd(18)} ${inv.hasNegativeDemo ? icon(true) : icon(false, true) + ' will generate'}`);
+    console.log(`   ${GRADER_FILE.padEnd(18)} ${inv.hasGrader ? icon(true) : icon(false, true) + ' will generate'}`);
+    console.log(`   ${TASK_FILE.padEnd(18)} ${inv.hasTask ? icon(true) : icon(false, true) + ' will generate'}`);
+  }
+}
+
+export function exciseOldEvalArtifacts(guideDir: string): void {
+  const oldArtifacts = [
+    path.join(guideDir, 'tasks'),
+    path.join(guideDir, GRADER_FILE),
+    path.join(guideDir, NEGATIVE_DEMO_FILE),
+  ];
+
+  for (const artifactPath of oldArtifacts) {
+    if (fs.existsSync(artifactPath)) {
+      fs.rmSync(artifactPath, { recursive: true, force: true });
+    }
+  }
+}
+
+export async function devGuide(targetDirRaw: string, options: DevGuideOptions = {}, inv?: GuideInventory): Promise<boolean> {
+  const maxRetries = options.maxRetries ?? 4;
+  const targetDir = path.resolve(process.cwd(), targetDirRaw);
+  const targets = options.targets ?? SUPPORTED_BASE_APPS;
+
+  if (!fs.existsSync(targetDir)) {
+    console.error(`Error: Directory not found: ${targetDir}`);
+    return false;
+  }
+
+  // Step 0: If rerun has reviewer comments, apply feedback to guide/expectations/targets first
+  if (options.prContext?.comments) {
+    await applyPrReviewFeedback(targetDir, options.prContext);
+  }
+
+  // After Step 0, regenerate only what the changed files require (needs-dev-rerun and local `gd dev` runs alike).
+  for (const t of targets) {
+    applyTargetRerun(targetDir, path.join(targetDir, TARGETS_DIR, t));
+  }
+
+  // Step 0.5: Excise old eval artifacts if they exist
+  exciseOldEvalArtifacts(targetDir);
+
+  // Step 1: Validate guide inventory
+  const currentInv = inv?.targets ? inv : inventoryGuide(targetDir, { useTargetEvals: true });
+  printInventory(currentInv, targets);
+
+  if (!currentInv.hasGuide) {
+    if (currentInv.isStub) {
+      console.error(cRed(`\nError: ${GUIDE_FILE} is just a stub (missing content) in ${targetDir}`));
+    } else {
+      console.error(cRed(`\nError: ${GUIDE_FILE} is required but missing or empty in ${targetDir}`));
+    }
+    return false;
+  }
+  if (!currentInv.hasExpectations) {
+    console.error(cRed(`\nError: ${EXPECTATIONS_FILE} is required for generating target artifacts.`));
+    return false;
+  }
+
+  // Ensure teacher vectors exist and rebuild skills-cli dist upfront when running tests
+  if (options.test !== false) {
+    await ensureGuidedEvalDist();
+  }
+
+  // Step 2: Parallel target generation and calibration across targets
+  const calibrationFailures = new Map<string, string>();
+  const calibrationResults = await Promise.all(
+    targets.map(async (baseApp) => {
+      const targetCapsuleDir = path.join(targetDir, TARGETS_DIR, baseApp);
+      fs.mkdirSync(targetCapsuleDir, { recursive: true });
+
+      // Start zeroPassrateTask immediately in parallel with generateTargetTask
+      const zeroPassrateTask = (async () => {
+        const zeroPassratePatch = path.join(targetCapsuleDir, ZERO_PASSRATE_PATCH_FILE);
+        if (!fs.existsSync(zeroPassratePatch)) {
+          console.log(cCyan(`\n--- Generating ${ZERO_PASSRATE_PATCH_FILE} for ${baseApp} ---`));
+          await generateTargetPatch(targetDir, baseApp, 'zero-passrate');
+        }
+      })();
+
+      // Generate task.md first so solution agents can consume it
+      const taskFile = path.join(targetCapsuleDir, TASK_FILE);
+      if (!fs.existsSync(taskFile)) {
+        console.log(cCyan(`\n--- Generating ${TASK_FILE} for ${baseApp} ---`));
+        await generateTargetTask(targetDir, baseApp, options.prContext);
+      }
+
+      // Once generateTargetTask finishes, run the solution agents in parallel
+      const solutionAgents = getActiveSolutionAgents(targetCapsuleDir);
+      const patchTasks = solutionAgents.map(async (agent) => {
+        const solPatchFile = SOLUTION_PATCH_FILES[agent];
+        const solutionPatch = path.join(targetCapsuleDir, solPatchFile);
+        if (!fs.existsSync(solutionPatch)) {
+          console.log(cCyan(`\n--- Generating ${solPatchFile} for ${baseApp} (${agent}) ---`));
+          await generateTargetPatch(targetDir, baseApp, agent);
+        }
+      });
+
+      // Wait for solution patches and zero-passrate patch to finish
+      await Promise.all([...patchTasks, zeroPassrateTask]);
+
+      // Grader generation depends on the generated solution patches in patches/
+      const graderFile = path.join(targetCapsuleDir, GRADER_FILE);
+      if (!fs.existsSync(graderFile)) {
+        console.log(cCyan(`\n--- Generating ${GRADER_FILE} for ${baseApp} ---`));
+        await generateTargetGrader(targetDir, baseApp, undefined, options.prContext);
+      }
+
+      // Calibrate target and retry grader if calibration fails
+      console.log(cCyan(`\n--- Calibrating target: ${baseApp} ---`));
+      for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+        const res = await testGrader(path.join(targetDirRaw, TARGETS_DIR, baseApp));
+        if (res.success) {
+          console.log(cGreen(`✅ ${baseApp} calibrated successfully on attempt ${attempt}!`));
+          return true;
+        }
+
+        if (res.sharedFailingTests && res.sharedFailingTests.length > 0) {
+          console.error(cRed(`❌ All golden solutions failed the same check(s) on ${baseApp}:\n${res.sharedFailingTests.map(t => `   - ${t}`).join('\n')}`));
+          console.error(cYellow(`Aborting calibration immediately (0 retries). Presuming guide.md / expectations.md misalignment or broken test.`));
+          calibrationFailures.set(baseApp, res.errorDetails || 'All golden solutions failed shared grader checks.');
+          return false;
+        }
+
+        if (attempt <= maxRetries) {
+          console.log(cYellow(`Attempt ${attempt} calibration failed for ${baseApp}. Regenerating ${GRADER_FILE}...`));
+          await generateTargetGrader(targetDir, baseApp, res.errorDetails, options.prContext);
+        } else {
+          console.error(cRed(`❌ ${baseApp} failed calibration after ${attempt} attempt(s): ${res.errorDetails || 'Unknown error'}`));
+          calibrationFailures.set(baseApp, res.errorDetails || 'Calibration failed after maximum retries.');
+          return false;
+        }
+      }
+      return false;
+    })
+  );
+  const overallSuccess = calibrationResults.every(Boolean);
+
+  // Step 4: Run agent evaluation test (runs by default unless --no-test is passed or calibration failed)
+  if (options.test !== false && overallSuccess) {
+    await runAgentTest(targetDir, currentInv.name, options.guidedOnly, options.suiteConfig, targets);
+  }
+
+  // Summary
+  const defaultAgent = getDefaultSolutionAgent();
+  printSummary(targetDir, currentInv, { success: overallSuccess, solutions: { [defaultAgent]: { passed: 0, failed: 0, failingTests: [] }, [Agents.CLAUDE_CODE]: { passed: 0, failed: 0, failingTests: [] }, [Agents.CODEX_CLI]: { passed: 0, failed: 0, failingTests: [] } }, zeroPassrate: { passed: 0, failed: 0, passingTests: [] } }, 1, targets);
+
+  // Commit generated evals and artifacts before Step 5 report modifications
+  devCli.commitStepArtifacts(targetDir, `feat(guide): generate ${currentInv.name} evaluations and artifacts`);
+
+  // Step 5: Run evaluation report (printed last)
+  if (options.test !== false && (overallSuccess || calibrationFailures.size > 0)) {
+    await runDevReport(targetDir, currentInv, targets, options.prContext, calibrationFailures);
+  }
+
+  // Commit post-report modifications if any files were updated by the report agent
+  devCli.commitStepArtifacts(targetDir, `fix(guide): apply post-evaluation report recommendations for ${currentInv.name}`);
+
+  return overallSuccess;
+}
+
+export function prepareTargetGuide(guideDirAbs: string, workDir: string): void {
+  const guidePath = path.join(guideDirAbs, GUIDE_FILE);
+  const rawGuide = fs.readFileSync(guidePath, 'utf-8');
+  const expandedGuide = replaceMacros(rawGuide, guidePath, { target: 'skills-cli' });
+  fs.writeFileSync(path.join(workDir, GUIDE_FILE), expandedGuide);
+}
+
+async function generateTargetPatch(guideDirAbs: string, baseApp: string, patchType: SolutionAgent | 'zero-passrate'): Promise<void> {
+  const agent = patchType === 'zero-passrate' ? getDefaultSolutionAgent() : patchType;
+  if (agent === Agents.CODEX_CLI) await ensureFreshHostCodexAuth();
+  const { workDir, tempHome } = setupGuideDevWorkDir(`${baseApp}-${patchType}`, undefined, agent);
+  try {
+    await copyBaseAppToWorkspace(baseApp, workDir);
+
+    prepareTargetGuide(guideDirAbs, workDir);
+
+    let prompt: string;
+    if (patchType === 'zero-passrate') {
+      fs.copyFileSync(path.join(guideDirAbs, EXPECTATIONS_FILE), path.join(workDir, EXPECTATIONS_FILE));
+      prompt = buildZeroPassratePrompt({
+        guideFile: GUIDE_FILE,
+        expectationsFile: EXPECTATIONS_FILE,
+        workDir,
+        isDisciplineGuide: isDisciplineGuide(path.basename(guideDirAbs), path.basename(path.dirname(guideDirAbs))),
+      });
+    } else {
+      const sourceTask = path.join(guideDirAbs, TARGETS_DIR, baseApp, TASK_FILE);
+      if (fs.existsSync(sourceTask)) {
+        fs.copyFileSync(sourceTask, path.join(workDir, TASK_FILE));
+      }
+      prompt = buildSolutionPrompt({
+        guideFile: GUIDE_FILE,
+        taskFile: TASK_FILE,
+        workDir,
+        isDisciplineGuide: isDisciplineGuide(path.basename(guideDirAbs), path.basename(path.dirname(guideDirAbs))),
+      });
+    }
+
+    // Git init is required for capturePatchFromGit to extract git diffs.
+    // Initialized after copying expectations.md / task.md so they are part of initial commit.
+    initGitRepo(workDir);
+
+    await runAgent(agent, prompt, workDir, { homeDir: tempHome });
+
+    const patchRelFile = patchType === 'zero-passrate' ? ZERO_PASSRATE_PATCH_FILE : SOLUTION_PATCH_FILES[patchType];
+    const destPatch = path.join(guideDirAbs, TARGETS_DIR, baseApp, patchRelFile);
+    fs.mkdirSync(path.dirname(destPatch), { recursive: true });
+    capturePatchFromGit(workDir, destPatch);
+    if (!fs.existsSync(destPatch)) {
+      fs.writeFileSync(destPatch, '');
+    }
+  } finally {
+    try {
+      fs.rmSync(tempHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+    } catch (e) {
+      console.warn(`Warning: failed to remove tempHome ${tempHome}: ${(e as Error).message}`);
+    }
+  }
+}
+
+async function generateTargetTask(
+  guideDirAbs: string,
+  baseApp: string,
+  prContext?: DevGuideOptions['prContext']
+): Promise<void> {
+  const { workDir, tempHome } = setupGuideDevWorkDir(`${baseApp}-task`);
+  try {
+    const rawGuide = fs.readFileSync(path.join(guideDirAbs, GUIDE_FILE), 'utf-8');
+    const guideDescription = extractGuideDescription(rawGuide);
+    await copyBaseAppToWorkspace(baseApp, workDir);
+
+    const prompt = buildTargetTaskPrompt({
+      guideDescription,
+      taskFile: TASK_FILE,
+      baseApp,
+      isDisciplineGuide: isDisciplineGuide(path.basename(guideDirAbs), path.basename(path.dirname(guideDirAbs))),
+      prContext,
+    });
+
+    await runAgent(getDefaultSolutionAgent(), prompt, workDir, { homeDir: tempHome });
+
+    const generatedTask = path.join(workDir, TASK_FILE);
+    if (!fs.existsSync(generatedTask) || !fs.readFileSync(generatedTask, 'utf-8').trim()) {
+      throw new Error(`Agent finished without generating a valid ${TASK_FILE} for ${baseApp}.`);
+    }
+    const destTask = path.join(guideDirAbs, TARGETS_DIR, baseApp, TASK_FILE);
+    fs.mkdirSync(path.dirname(destTask), { recursive: true });
+    fs.copyFileSync(generatedTask, destTask);
+  } finally {
+    try {
+      fs.rmSync(tempHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+    } catch (e) {
+      console.warn(`Warning: failed to remove tempHome ${tempHome}: ${(e as Error).message}`);
+    }
+  }
+}
+
+async function runAgentTest(
+  targetDir: string,
+  guideName: string,
+  guidedOnly = false,
+  suiteConfig?: SuiteConfig,
+  targets: readonly string[] = SUPPORTED_BASE_APPS
+): Promise<void> {
+  console.log(cCyan(`\n--- Running agent tests ---`));
+
+  const targetsDir = path.join(targetDir, 'targets');
+  if (!fs.existsSync(targetsDir) || !fs.statSync(targetsDir).isDirectory()) {
+    console.log(cYellow(`No targets directory found in ${targetDir}. Skipping agent tests.`));
+    return;
+  }
+
+  const baseApps = fs.readdirSync(targetsDir).filter(name => {
+    return !name.startsWith('.') && fs.statSync(path.join(targetsDir, name)).isDirectory() && targets.includes(name);
+  });
+
+  if (baseApps.length === 0) {
+    console.log(cYellow(`No supported base apps found in ${targetsDir}. Skipping agent tests.`));
+    return;
+  }
+
+  resetGuidesMap();
+  const taskMap = getTaskMap();
+
+  await Promise.all(
+    baseApps.map(async (baseApp) => {
+      console.log(cCyan(`\nRunning agent test for target: ${baseApp}`));
+      const taskKey = `${guideName}/${baseApp}`;
+      const taskInfo = taskMap.get(taskKey);
+      if (!taskInfo) {
+        console.error(cRed(`Task info not found for ${taskKey}, cannot run agent test.`));
+        return;
+      }
+
+      const targetGraderPath = path.join(targetsDir, baseApp, 'grader.ts');
+      if (!fs.existsSync(targetGraderPath)) {
+        console.error(cRed(`Could not find grader.ts for ${baseApp} at ${targetGraderPath}`));
+        return;
+      }
+
+      const taskVariants = Array.from(taskMap.entries())
+        .filter(([key, info]) => key.startsWith(`${guideName}/`) && info.baseApp === baseApp && info.guideDir === targetDir)
+        .map(([key, info]) => ({
+          taskKey: key,
+          taskName: key.split('/')[1]!,
+          baselineTarget: info.baselineTarget || 'widely',
+        }));
+
+      const tasksToRun = taskVariants.length > 0
+        ? taskVariants
+        : [{ taskKey, taskName: baseApp, baselineTarget: taskInfo.baselineTarget || 'widely' }];
+
+      // 1. Grade base app (with zero-passrate baseline applied)
+      const relGuidePath = path.relative(guidesDir, targetDir);
+      const [category, name] = relGuidePath.split(path.sep);
+      const guideResultsDir = getGuideResultsDir({ category, name: name || guideName });
+      const zeroPassratePatch = path.join(targetsDir, baseApp, ZERO_PASSRATE_PATCH_FILE);
+      const preResults = await gradeOutput(
+        baseApp,
+        targetsDir,
+        targetGraderPath,
+        zeroPassratePatch,
+        undefined,
+        'widely'
+      );
+
+      // 2. Run agent suite across all baseline variants for this target
+      const { runSuite } = await import('../harness/run-suite.ts');
+      const testOutputDir = path.join(guideResultsDir, baseApp);
+      const agent = getDefaultSolutionAgent();
+      await runSuite({
+        name: `${guideName}-${baseApp}`,
+        outputDir: testOutputDir,
+        tasks: tasksToRun.map(v => v.taskKey),
+        numRuns: 1,
+        guidedOnly,
+        skipSkillBuild: true,
+        suiteConfig: {
+          ...suiteConfig,
+          agent,
+        },
+      });
+
+      // 3. Grade agent output (unguided + guided) across variants
+      const runTypes = guidedOnly ? ['guided'] : ['unguided', 'guided'];
+      for (const variant of tasksToRun) {
+        const isDefaultVariant = variant.taskName === baseApp;
+        const variantResults: Record<string, { passed: number; total: number }> =
+          isDefaultVariant && preResults ? { pre: preResults } : {};
+
+        for (const runType of runTypes) {
+          const resultDir = path.join(testOutputDir, '1', guideName, variant.taskName, runType);
+          if (!fs.existsSync(resultDir)) continue;
+          const patchFile = path.join(resultDir, 'agent.patch');
+          const label = isDefaultVariant ? runType : `${variant.taskName} (${runType})`;
+          const gradeResults = await gradeOutput(
+            label,
+            resultDir,
+            targetGraderPath,
+            patchFile,
+            zeroPassratePatch,
+            variant.baselineTarget
+          );
+          if (gradeResults) {
+            variantResults[runType] = gradeResults;
+          }
+        }
+
+        const guidedDir = path.join(testOutputDir, '1', guideName, variant.taskName, 'guided');
+        let guidesConsumed: string[] = [];
+        if (fs.existsSync(guidedDir)) {
+          const usage = await collectGuidesUsed(guidedDir);
+          guidesConsumed = Array.from(new Set([...usage.retrievedGuides, ...usage.fileReadGuides]));
+        }
+
+        printTestComparison(variantResults, guidesConsumed, variant.taskName);
+      }
+    })
+  );
+}
+
+async function gradeOutput(
+  label: string,
+  appDir: string,
+  graderPath: string,
+  patchFile?: string,
+  zeroPassrateFile?: string,
+  baselineTarget?: string
+): Promise<{ passed: number; total: number } | null> {
+  console.log(cYellow(`\nGrading ${label}...`));
+
+  try {
+    const gradeResults = await runPlaywright(appDir, graderPath, {
+      stdio: 'pipe',
+      patchFile,
+      zeroPassrateFile,
+      baselineTarget,
+    });
+    const passed = gradeResults.stats?.expected || 0;
+    const failed = gradeResults.stats?.unexpected || 0;
+    const total = passed + failed;
+
+    if (total > 0) {
+      console.log(`  ${label}: ${passed}/${total} checks passed (${Math.round(passed / total * 100)}%)`);
+    }
+    return { passed, total };
+  } catch (err) {
+    console.error(cRed(`Failed to grade ${label}: ${err}`));
+    return null;
+  }
+}
+
+export function printTestComparison(
+  results: Record<string, { passed: number; total: number }>,
+  guidesConsumed: string[] | undefined,
+  baseApp: string
+): void {
+  const total = results.pre?.total || results.guided?.total || results.unguided?.total || 0;
+  if (total === 0) return;
+
+  const fmt = (label: string, r: { passed: number; total: number } | undefined, pad: number) => {
+    if (!r) return `  ${label.padEnd(pad)} —`;
+    const pct = Math.round(r.passed / r.total * 100);
+    return `  ${label.padEnd(pad)} ${r.passed}/${r.total} checks passed (${pct}%)`;
+  };
+
+  console.log(cBold(`\nAgent test results (${baseApp}):`));
+  console.log(fmt('Base app (zero-passrate):', results.pre, 25));
+  console.log(fmt('Unguided:', results.unguided, 25));
+  console.log(fmt('Guided:', results.guided, 25));
+
+  if (results.guided && results.unguided && results.guided.total > 0 && results.unguided.total > 0) {
+    const guidedPct = Math.round(results.guided.passed / results.guided.total * 100);
+    const unguidedPct = Math.round(results.unguided.passed / results.unguided.total * 100);
+    const impact = guidedPct - unguidedPct;
+    console.log(`  ${'Guide impact:'.padEnd(25)} ${impact >= 0 ? '+' : ''}${impact}% (vs unguided)`);
+  }
+
+  if (guidesConsumed && guidesConsumed.length > 0) {
+    console.log(`  ${'Guides consumed:'.padEnd(18)} [${guidesConsumed.join(', ')}]`);
+  }
+}
+
+function printSummary(targetDir: string, inv: GuideInventory, result: CalibrationResult | null, attempts: number, targets: readonly string[] = SUPPORTED_BASE_APPS): void {
+  const relDir = path.relative(process.cwd(), targetDir);
+
+  console.log(`\n${'='.repeat(60)}`);
+  if (result?.success) {
+    console.log(cBold(cGreen(`\u2705 Guide: ${inv.name}`)));
+  } else {
+    console.log(cBold(cRed(`\u274c Guide: ${inv.name}`)));
+  }
+
+  console.log(`   ${GUIDE_FILE.padEnd(28)} \u2705 exists`);
+  
+  if (!inv.hasExpectations || inv.expectationsEmpty) {
+    console.log(`   ${EXPECTATIONS_FILE.padEnd(28)} \u26a0\ufe0f  ${inv.hasExpectations ? 'empty' : 'missing'} (consider adding checks)`);
+  } else {
+    console.log(`   ${EXPECTATIONS_FILE.padEnd(28)} \u2705 exists`);
+  }
+
+  const targetsDir = path.join(targetDir, TARGETS_DIR);
+  if (fs.existsSync(targetsDir) && fs.statSync(targetsDir).isDirectory()) {
+    const baseApps = fs.readdirSync(targetsDir).filter(name => {
+      return !name.startsWith('.') && fs.statSync(path.join(targetsDir, name)).isDirectory() && targets.includes(name);
+    });
+
+    for (const baseApp of baseApps) {
+      console.log(`\n   ${cBold(`Target Base App: ${baseApp}`)}`);
+      const appTargetDir = path.join(targetsDir, baseApp);
+      
+      const zeroPassratePatchPath = path.join(appTargetDir, ZERO_PASSRATE_PATCH_FILE);
+      const graderPath = path.join(appTargetDir, GRADER_FILE);
+      const taskPath = path.join(appTargetDir, TASK_FILE);
+
+      const printFileStatus = (label: string, filepath: string, existsMsg = 'exists', missingMsg = 'missing') => {
+        const exists = fs.existsSync(filepath);
+        console.log(`     ${label.padEnd(28)} ${exists ? cGreen('✅') : cRed('❌')} ${exists ? existsMsg : missingMsg}`);
+      };
+
+      const activeAgents = getActiveSolutionAgents(appTargetDir);
+      for (const agent of activeAgents) {
+        const solPatchFile = SOLUTION_PATCH_FILES[agent];
+        const solutionPatchPath = path.join(appTargetDir, solPatchFile);
+        printFileStatus(solPatchFile, solutionPatchPath, 'generated', 'not generated');
+      }
+
+      printFileStatus(ZERO_PASSRATE_PATCH_FILE, zeroPassratePatchPath, 'generated', 'not generated');
+      
+      if (result?.success) {
+        printFileStatus(GRADER_FILE, graderPath, `calibrated (attempt ${attempts})`, 'calibration failed');
+      } else {
+        printFileStatus(GRADER_FILE, graderPath, 'exists', 'missing');
+      }
+      
+      printFileStatus(TASK_FILE, taskPath, 'generated', 'not generated');
+    }
+  }
+
+  const evalReportPath = path.join(getGuideResultsDir(inv), REPORT_FILE);
+  if (fs.existsSync(evalReportPath)) {
+    console.log(`\n   ${cBold('Evaluation Report:')}`);
+    console.log(`     ${REPORT_FILE.padEnd(28)} ${cGreen('✅')} generated`);
+  }
+
+  console.log(`\nAll generated files are in ${relDir}/`);
+  if (result?.success) {
+    console.log(`Ready to review and commit.`);
+  }
+  console.log('');
+}
+
+// Batch mode: process all incomplete guides
+export async function devAll(options: DevGuideOptions = {}): Promise<void> {
+  const incompleteGuides = scanAllGuides().filter(inv =>
+    inv.hasGuide && inv.hasExpectations && !inv.expectationsEmpty && classifyGuide(inv) !== 'complete'
+  );
+
+  if (incompleteGuides.length === 0) {
+    console.log(cGreen(`All guides are complete!`));
+    return;
+  }
+
+  console.log(cBold(`Found ${incompleteGuides.length} incomplete/uncalibrated guide(s):\n`));
+  for (const inv of incompleteGuides) {
+    const status = classifyGuide(inv);
+    console.log(`  ${inv.name} ${cDim(`(status: ${status})`)}`);
+  }
+  console.log('');
+
+  const results: { name: string; success: boolean }[] = [];
+
+  // Use sequential processing to avoid resource exhaustion
+  for (const inv of incompleteGuides) {
+    console.log(cBold(`\n${'='.repeat(60)}`));
+    console.log(cBold(`Processing: ${inv.name}`));
+    console.log(`${'='.repeat(60)}`);
+
+    try {
+      const success = await devGuide(inv.dir, { ...options, test: false }, inv);
+      results.push({ name: inv.name, success });
+    } catch (err) {
+      console.error(cRed(`Failed to process ${inv.name}: ${err}`));
+      results.push({ name: inv.name, success: false });
+    }
+  }
+
+  // Aggregate results
+  const succeeded = results.filter(r => r.success);
+  const failed = results.filter(r => !r.success);
+
+  console.log(cBold(`\n${'='.repeat(60)}`));
+  console.log(cBold(`Batch complete: ${succeeded.length}/${results.length} guides calibrated`));
+  if (failed.length > 0) {
+    console.log(cRed(`Failed: ${failed.map(r => r.name).join(', ')}`));
+  }
+  console.log('');
+}
+
+if (import.meta.url.startsWith('file:') && process.argv[1] === import.meta.filename) {
+  const args = process.argv.slice(2);
+  const dir = args.find(a => !a.startsWith('--'));
+  const isTest = !args.includes('--no-test');
+  const guidedOnly = args.includes('--guided-only');
+
+  if (!dir) {
+    console.error('Usage: node src/authoring/dev.ts <path/to/guide> [--no-test] [--guided-only]');
+    process.exit(1);
+  }
+
+  devGuide(dir, { test: isTest, guidedOnly }).then(success => {
+    process.exit(success ? 0 : 1);
+  }).catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

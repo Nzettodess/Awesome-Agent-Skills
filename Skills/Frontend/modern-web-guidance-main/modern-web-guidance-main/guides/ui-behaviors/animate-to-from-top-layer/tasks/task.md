@@ -1,0 +1,1 @@
+- Add a confirmation dialog triggered by the logout link in the nav (id="open-dialog-btn", with close button id="close-dialog-btn") and a dismissible informational floating notice triggered by a button (id="foobar"), with smooth entry and exit transitions.

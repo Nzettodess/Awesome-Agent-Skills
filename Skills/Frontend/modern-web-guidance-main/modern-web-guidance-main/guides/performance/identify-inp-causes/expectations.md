@@ -1,0 +1,4 @@
+- INP subparts (`inputDelay`, `processingDuration`, `presentationDelay`) are provided.
+- The `longestScript.entry` object may be empty and this should be handled.
+- Style and layout durations from Long Animation Frames (`styleDuration`, `layoutDuration`, `forcedStyleDuration`, `forcedLayoutDuration`, or combined fallbacks `forcedStyleAndLayoutDuration` / `totalStyleAndLayoutDuration`) are reported.
+- The `web-vitals` library, or some other RUM library, is used rather than trying to re-implement INP.

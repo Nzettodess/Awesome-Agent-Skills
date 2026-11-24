@@ -1,0 +1,228 @@
+diff --git a/src/components/BottomNav.tsx b/src/components/BottomNav.tsx
+index 6d031f5..37c28e2 100644
+--- a/src/components/BottomNav.tsx
++++ b/src/components/BottomNav.tsx
+@@ -27,9 +27,16 @@ const BottomNav: React.FC<BottomNavProps> = ({ categories, articles, reports, mu
+     const filteredMultimedia = activeCategory ? multimedia.filter(m => m.data.category === activeCategory) : [];
+ 
+     return (
+-        <div onMouseLeave={handleMouseLeave}>
++        <div onMouseLeave={handleMouseLeave} onClick={event => {
++            if (event.target instanceof Element && event.target.closest('a[href]:not([href="#"])')) setActiveCategory(null);
++        }}>
+             <div className="border-t border-b border-gray-900">
+                 <nav className="container mx-auto px-4 flex justify-center items-center text-sm font-semibold space-x-6 h-10 overflow-x-auto">
++                    <a href={import.meta.env.BASE_URL} className="whitespace-nowrap hover:text-gray-600">Top News</a>
++                    <a href={`${import.meta.env.BASE_URL}world`} className="whitespace-nowrap hover:text-gray-600">World</a>
++                    <a href={`${import.meta.env.BASE_URL}category/politics`} className="whitespace-nowrap hover:text-gray-600">Politics</a>
++                    <a href={`${import.meta.env.BASE_URL}multimedia`} className="whitespace-nowrap hover:text-gray-600">Multimedia</a>
++                    <a href={`${import.meta.env.BASE_URL}reports`} className="whitespace-nowrap hover:text-gray-600">Reports</a>
+                     {Object.entries(groupedCategories).map(([groupName, subCategories]) => {
+                         return (
+                             <div 
+diff --git a/src/layouts/Layout.astro b/src/layouts/Layout.astro
+index dcf9696..9fd74ac 100644
+--- a/src/layouts/Layout.astro
++++ b/src/layouts/Layout.astro
+@@ -4,7 +4,6 @@ import Footer from "../components/Footer.astro";
+ import AdSlotFireplace from "../components/AdSlotFireplace.tsx";
+ import "../styles/global.css";
+ 
+-import { ClientRouter } from "astro:transitions";
+ 
+ export interface Props {
+   title: string;
+@@ -34,7 +33,7 @@ const baseUrl = import.meta.env.BASE_URL;
+ 
+     <link rel="icon" href=`${baseUrl}/favicon.svg` />
+ 
+-    <ClientRouter />
++    <script src="../scripts/section-router.ts"></script>
+   </head>
+   <body class="bg-gray-100">
+     <div class="mx-auto">
+@@ -45,8 +44,10 @@ const baseUrl = import.meta.env.BASE_URL;
+         <div>
+           <Header />
+         </div>
+-        <main class="bg-white relative">
+-          <slot />
++        <main class="bg-white relative" data-section-host>
++          <div class="spa-view" tabindex="-1" data-section-view>
++            <slot />
++          </div>
+         </main>
+       </div>
+     </div>
+diff --git a/src/pages/world.astro b/src/pages/world.astro
+new file mode 100644
+index 0000000..477e1f6
+--- /dev/null
++++ b/src/pages/world.astro
+@@ -0,0 +1,15 @@
++---
++import Layout from '../layouts/Layout.astro';
++import SimpleTeaserGrid from '../components/SimpleTeaserGrid.astro';
++import { getCollection } from 'astro:content';
++
++// Match the World selection on the Top News landing page.
++const articles = (await getCollection('articles'))
++  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf())
++  .slice(8, 11);
++---
++
++<Layout title="World | The DevTools Times">
++  <h1 class="text-3xl font-bold px-6 pt-8">World</h1>
++  <SimpleTeaserGrid title="World news" articles={articles} />
++</Layout>
+diff --git a/src/scripts/section-router.ts b/src/scripts/section-router.ts
+new file mode 100644
+index 0000000..2c17af8
+--- /dev/null
++++ b/src/scripts/section-router.ts
+@@ -0,0 +1,116 @@
++// Only section landing pages belong in this bounded DOM cache. Article and
++// account links retain normal document navigation.
++const base = new URL(import.meta.env.BASE_URL, location.origin).pathname.replace(/\/$/, '');
++const keyFor = (url: URL): string | null => {
++  if (url.origin !== location.origin || url.search) return null;
++  const path = url.pathname.replace(/\/$/, '');
++  if (path === base || path === `${base}/world` || path === `${base}/multimedia` || path === `${base}/reports` ||
++      new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/category/[^/]+$`).test(path)) return path;
++  return null;
++};
++
++const host = document.querySelector<HTMLElement>('[data-section-host]');
++const initialView = host?.querySelector<HTMLElement>('[data-section-view]');
++const initialKey = keyFor(new URL(location.href));
++
++if (host && initialView && initialKey !== null) {
++  interface CachedView { element: HTMLElement; title: string; scroll: number }
++  const views = new Map<string, CachedView>();
++  const limit = 6;
++  let activeKey = initialKey;
++  let request = 0;
++  views.set(initialKey, { element: initialView, title: document.title, scroll: scrollY });
++  history.scrollRestoration = 'manual';
++
++  const updateNavigation = () => {
++    document.querySelectorAll<HTMLAnchorElement>('header a[href]').forEach(link => {
++      if (keyFor(new URL(link.href)) === activeKey) link.setAttribute('aria-current', 'page');
++      else link.removeAttribute('aria-current');
++    });
++  };
++
++  const navigate = async (url: URL, pop: boolean) => {
++    const key = keyFor(url);
++    if (key === null) return;
++    const version = ++request;
++    try {
++      let target = views.get(key);
++      if (!target) {
++        const response = await fetch(url, { headers: { Accept: 'text/html' } });
++        if (!response.ok || keyFor(new URL(response.url)) !== key) throw new Error('Section unavailable');
++        const page = new DOMParser().parseFromString(await response.text(), 'text/html');
++        const element = page.querySelector<HTMLElement>('[data-section-view]');
++        if (!element) throw new Error('Missing section');
++        // Astro may split section-specific styling into separate stylesheets.
++        await Promise.all(Array.from(page.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')).map(link => {
++          if (Array.from(document.styleSheets).some(sheet => sheet.href === link.href)) return;
++          return new Promise<void>((resolve, reject) => {
++            const stylesheet = link.cloneNode(true) as HTMLLinkElement;
++            stylesheet.onload = () => resolve();
++            stylesheet.onerror = () => { stylesheet.remove(); reject(new Error('Stylesheet unavailable')); };
++            document.head.append(stylesheet);
++          });
++        }));
++        if (version !== request) return;
++        target = { element, title: page.title, scroll: 0 };
++        element.classList.add('inactive');
++        element.inert = true;
++        host.append(element);
++        // Execute Astro's component registration/hydration scripts once the
++        // fetched islands are connected. Retained views never run these again.
++        element.querySelectorAll('script').forEach(oldScript => {
++          const script = document.createElement('script');
++          for (const attribute of oldScript.attributes) script.setAttribute(attribute.name, attribute.value);
++          script.textContent = oldScript.textContent;
++          oldScript.replaceWith(script);
++        });
++        views.set(key, target);
++      }
++      if (version !== request) return;
++      const previous = views.get(activeKey);
++      if (previous) previous.scroll = scrollY;
++      for (const view of views.values()) {
++        const inactive = view !== target;
++        view.element.classList.toggle('inactive', inactive);
++        view.element.inert = inactive;
++        view.element.setAttribute('aria-hidden', String(inactive));
++      }
++      activeKey = key;
++      views.delete(key);
++      views.set(key, target);
++      document.title = target.title;
++      if (!pop) history.pushState(null, '', url);
++      target.element.focus({ preventScroll: true });
++      scrollTo(0, target.scroll);
++      if (url.hash) document.getElementById(decodeURIComponent(url.hash.slice(1)))?.scrollIntoView();
++      updateNavigation();
++      while (views.size > limit) {
++        const oldest = views.entries().next().value;
++        if (!oldest) break;
++        oldest[1].element.remove();
++        views.delete(oldest[0]);
++        // Astro defers island unmounting until this event. Release React
++        // effects and listeners when a view is actually evicted.
++        document.dispatchEvent(new Event('astro:after-swap'));
++      }
++    } catch {
++      if (version === request) location.assign(url);
++    }
++  };
++
++  document.addEventListener('click', event => {
++    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
++    const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null;
++    if (!link || link.hasAttribute('download') || (link.target && link.target !== '_self') || link.hasAttribute('data-astro-reload')) return;
++    const url = new URL(link.href);
++    if (keyFor(url) === null || (url.pathname === location.pathname && url.hash)) return;
++    event.preventDefault();
++    void navigate(url, false);
++  });
++  window.addEventListener('popstate', () => {
++    const url = new URL(location.href);
++    if (keyFor(url) === null) location.reload();
++    else void navigate(url, true);
++  });
++  updateNavigation();
++}
+diff --git a/src/styles/global.css b/src/styles/global.css
+index e9a9abb..abca4d8 100644
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -1,7 +1,22 @@
+ @import "tailwindcss";
+ 
++.spa-view.inactive {
++  content-visibility: hidden;
++  position: absolute;
++  inset: 0 0 auto;
++  height: 0;
++  overflow: clip;
++  pointer-events: none;
++}
++
++.spa-view:focus { outline: none; }
++
++@supports not (content-visibility: hidden) {
++  .spa-view.inactive { display: none; }
++}
++
+ .font-brand {
+   font-family: "Grenze", serif;
+   font-weight: 500;
+   font-style: normal;
+-}
+\ No newline at end of file
++}

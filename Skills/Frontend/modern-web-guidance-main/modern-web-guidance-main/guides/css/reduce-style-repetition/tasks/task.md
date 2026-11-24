@@ -1,0 +1,1 @@
+- Add a linear gradient background to the body and all h2 headings, and make the main layout responsive so it displays a single column at 400px viewport and two equal columns at 1000px, computing the gradients and responsive column layouts in CSS while ensuring standard property fallbacks are provided.

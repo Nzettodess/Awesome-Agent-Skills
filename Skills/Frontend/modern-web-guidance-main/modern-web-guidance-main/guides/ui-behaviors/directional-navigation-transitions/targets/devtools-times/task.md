@@ -1,0 +1,1 @@
+- Turn the Top Stories section on The DevTools Times homepage into a single-story carousel with Next and Previous buttons, and animate each story change to reflect the direction of travel so clicking Next slides the new story in from the right and clicking Previous slides it in from the left.

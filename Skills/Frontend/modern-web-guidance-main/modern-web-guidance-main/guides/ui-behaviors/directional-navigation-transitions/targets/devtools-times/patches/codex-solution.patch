@@ -1,0 +1,148 @@
+diff --git a/src/components/TopStoriesCarousel.astro b/src/components/TopStoriesCarousel.astro
+new file mode 100644
+index 0000000..788f2cd
+--- /dev/null
++++ b/src/components/TopStoriesCarousel.astro
+@@ -0,0 +1,102 @@
++---
++import type { CollectionEntry } from 'astro:content';
++
++interface Props {
++    articles: CollectionEntry<'articles'>[];
++}
++
++const { articles } = Astro.props;
++---
++
++{articles.length > 0 && (
++    <section aria-label="Top Stories" aria-roledescription="carousel" data-top-stories class="bg-white border-b border-gray-300">
++        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
++            <h2 class="text-sm font-bold uppercase tracking-wide mb-3">Top Stories</h2>
++            <div class="overflow-hidden">
++                <div data-story-viewport>
++                    {articles.map((article, index) => (
++                        <article data-story hidden={index !== 0} aria-roledescription="slide" aria-label={`${index + 1} of ${articles.length}`}>
++                            <a href={`${import.meta.env.BASE_URL}articles/${article.id}`}>
++                                <h3 class="font-bold text-gray-900 hover:text-amber-400">{article.data.title}</h3>
++                            </a>
++                            <time datetime={article.data.date.toISOString()} class="text-xs text-gray-500">{article.data.date.toLocaleDateString()}</time>
++                        </article>
++                    ))}
++                </div>
++            </div>
++            <div class="flex items-center gap-4 mt-3">
++                <button type="button" data-previous disabled={articles.length < 2} class="border border-gray-300 rounded px-3 py-1 text-sm hover:bg-gray-100 disabled:opacity-50">Previous</button>
++                <span data-story-status role="status" aria-live="polite" aria-atomic="true" class="text-xs text-gray-500">1 of {articles.length}</span>
++                <button type="button" data-next disabled={articles.length < 2} class="border border-gray-300 rounded px-3 py-1 text-sm hover:bg-gray-100 disabled:opacity-50">Next</button>
++            </div>
++        </div>
++    </section>
++)}
++
++<script>
++    const carousel = document.querySelector<HTMLElement>('[data-top-stories]');
++    if (carousel) {
++        const stories = Array.from(carousel.querySelectorAll<HTMLElement>('[data-story]'));
++        const status = carousel.querySelector<HTMLElement>('[data-story-status]');
++        const buttons = Array.from(carousel.querySelectorAll<HTMLButtonElement>('button'));
++        let index = 0;
++        let pending = false;
++
++        // Use a local API shape so older DOM type definitions also support transition types.
++        const transitionDocument = document as Document & {
++            startViewTransition?: (options: { update: () => void; types: string[] }) => { finished: Promise<void> };
++        };
++
++        async function navigate(direction: 'forward' | 'backward') {
++            if (pending || stories.length < 2) return;
++            const update = () => {
++                stories[index].hidden = true;
++                index = (index + (direction === 'forward' ? 1 : -1) + stories.length) % stories.length;
++                stories[index].hidden = false;
++                if (status) status.textContent = `${index + 1} of ${stories.length}`;
++            };
++
++            if (!transitionDocument.startViewTransition || !CSS.supports('selector(:active-view-transition-type(forward))') || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
++                update();
++                return;
++            }
++
++            pending = true;
++            buttons.forEach(button => button.setAttribute('aria-disabled', 'true'));
++            try {
++                const transition = transitionDocument.startViewTransition({ update, types: [direction] });
++                // A skipped animation still applies its DOM update.
++                await transition.finished.catch(() => {});
++            } finally {
++                pending = false;
++                buttons.forEach(button => button.removeAttribute('aria-disabled'));
++            }
++        }
++
++        carousel.querySelector('[data-previous]')?.addEventListener('click', () => { void navigate('backward'); });
++        carousel.querySelector('[data-next]')?.addEventListener('click', () => { void navigate('forward'); });
++    }
++</script>
++
++<style is:global>
++    [data-story-viewport] { view-transition-name: top-story; }
++
++    @keyframes story-to-left { to { transform: translateX(-100%); opacity: 0; } }
++    @keyframes story-from-right { from { transform: translateX(100%); opacity: 0; } }
++    @keyframes story-to-right { to { transform: translateX(100%); opacity: 0; } }
++    @keyframes story-from-left { from { transform: translateX(-100%); opacity: 0; } }
++
++    ::view-transition-group(top-story) { animation-duration: 0.4s; animation-timing-function: ease-in-out; }
++    ::view-transition-old(top-story),
++    ::view-transition-new(top-story) { animation-duration: 0.4s; animation-timing-function: ease-in-out; animation-fill-mode: both; }
++    html:active-view-transition-type(forward)::view-transition-old(top-story) { animation-name: story-to-left; }
++    html:active-view-transition-type(forward)::view-transition-new(top-story) { animation-name: story-from-right; }
++    html:active-view-transition-type(backward)::view-transition-old(top-story) { animation-name: story-to-right; }
++    html:active-view-transition-type(backward)::view-transition-new(top-story) { animation-name: story-from-left; }
++
++    @media (prefers-reduced-motion: reduce) {
++        ::view-transition-group(top-story),
++        ::view-transition-old(top-story),
++        ::view-transition-new(top-story) { animation: none !important; }
++    }
++</style>
+diff --git a/src/pages/index.astro b/src/pages/index.astro
+index 92f6399..82bd02b 100644
+--- a/src/pages/index.astro
++++ b/src/pages/index.astro
+@@ -1,5 +1,6 @@
+ ---
+ import Layout from '../layouts/Layout.astro';
++import TopStoriesCarousel from '../components/TopStoriesCarousel.astro';
+ import ArticleTeaser from '../components/ArticleTeaser.astro';
+ import TopStoryTeaserGrid from '../components/TopStoryTeaserGrid.astro';
+ import Ad from '../components/AdSlotBanner';
+@@ -39,20 +40,7 @@ politicsArticles[2] = {
+ 
+ <Layout title="The DevTools Times">
+     <!-- Top Stories Bar -->
+-    <div class="bg-white border-b border-gray-300">
+-        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+-                {topStories.map(article => (
+-                    <div class="border-l border-gray-300 pl-4 first:border-l-0 first:pl-0">
+-                        <a href={`${import.meta.env.BASE_URL}articles/${article.id}`}>
+-                            <h3 class="font-bold text-gray-900 hover:text-amber-400 cursor-pointer">{article.data.title}</h3>
+-                        </a>
+-                        <span class="text-xs text-gray-500">{article.data.date.toLocaleDateString()}</span>
+-                    </div>
+-                ))}
+-            </div>
+-        </div>
+-    </div>
++    <TopStoriesCarousel articles={topStories} />
+ 
+     <!-- Main Content Area -->
+     <main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-6 mt-6">
+@@ -81,4 +69,4 @@ politicsArticles[2] = {
+         <TopStoryTeaserGrid title="Politics" articles={politicsArticles} />
+         
+     </div>
+-</Layout>
+\ No newline at end of file
++</Layout>

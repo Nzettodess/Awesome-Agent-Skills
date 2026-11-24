@@ -1,0 +1,1 @@
+- Make the seasonal favorite coffee cards feel springy on hover: give the Maple Oat Latte card the class `spring` so it overshoots its target scale and settles like a real spring, and give the Dark Roast Espresso card the class `bounce` with a playful bounce. Keep it polished and accessible.

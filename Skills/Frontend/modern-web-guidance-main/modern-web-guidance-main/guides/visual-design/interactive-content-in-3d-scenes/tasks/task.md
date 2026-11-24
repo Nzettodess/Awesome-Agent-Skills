@@ -1,0 +1,1 @@
+- Add an interactive 3D coffee box on the homepage that renders a real HTML form with inputs and buttons projected into the scene, keeping the form elements fully interactive and clickable as the box rotates, with a fallback for unsupported browsers.
