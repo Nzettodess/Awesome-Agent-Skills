@@ -1,0 +1,43 @@
+---
+title: Coding agents
+description: Let Claude Code, Codex, Cursor, OpenCode and other agents drive the CLI through the agent skill.
+---
+
+Reverse API Engineer ships an [agent skill](https://github.com/kalil0321/reverse-api-engineer/tree/main/skills/reverse-api-engineer)
+that tells coding agents how to drive the CLI. Install it in your project:
+
+```bash
+npx skills add kalil0321/reverse-api-engineer
+```
+
+Then ask your agent for what you need, for example "get me a typed client for
+the job search on this careers page". The skill only supplies instructions: the
+agent still runs `reverse-api-engineer`, so the CLI must be installed (see
+[Installation](/docs/installation)).
+
+## What the agent does
+
+1. **Checks the install** with `reverse-api-engineer --version`.
+2. **Reuses an earlier capture** when `list` and `show --json` find one with a
+   client, instead of browsing again.
+3. **Runs a preflight** with `agent --dry-run --json`, including the Chrome
+   auto-connect check for `chrome-mcp`.
+4. **Captures in the background** with `agent --json-stream`, then waits for
+   the final `result` event.
+5. **Verifies the client** by running it before handing it over.
+6. **Iterates on the same capture** with `engineer <run_id>` when the run kept
+   a HAR (`auto`, `agent-browser` and manual runs).
+7. **Hands it over** by copying the client into your project and summarizing
+   what it wraps, how it authenticates and what it did not test.
+
+## Your Chrome or a separate browser
+
+For public data the skill adds `--headless`, so your own Chrome is never
+touched. When a site needs your login, it uses `chrome-mcp` in your Chrome:
+tell the agent it may, keep Chrome open with auto-connect enabled at
+`chrome://inspect/#remote-debugging`, and accept the connection prompt Chrome
+shows when the run starts. If nobody accepts it, the run times out without a
+client.
+
+See [Scripted usage](/docs/cli/scripted-usage) for the JSON contract the skill
+relies on.

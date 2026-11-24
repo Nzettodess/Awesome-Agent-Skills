@@ -1,0 +1,574 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.16.0] - 2026-11-15
+
+### Added
+- **`hermes` backend**: `"sdk": "hermes"` engineers a saved capture through the local [`hermes` CLI](https://hermes-agent.nousresearch.com/docs) (`hermes chat --oneshot --format stream-json`), so a run needs no API key in rae — the model, the provider and the authentication are the user's own Hermes configuration. `hermes chat` reads the prompt on stdin, so nothing the model reads is shell-parsed; `hermes_max_turns` overrides the turn cap from the user's Hermes config; runs start with `--ignore-rules` so an `AGENTS.md`/`CLAUDE.md` cannot steer them, and estimate cost from the CLI's token counts, leaving it at 0 for a model with no known price. The backend covers `engineer` only: with `"sdk": "hermes"` the `agent` command stops before browser setup, so capture with another SDK (claude, opencode, copilot or cursor) and engineer that run with hermes; `agent --dry-run` reports the same error. The CLI is found on `PATH` or through `RAE_HERMES_BIN`, and `agent --dry-run` reports it as a check.
+- **Codex SDK backend (`sdk: "codex"`)**: agent and engineer runs on OpenAI Codex through its Python SDK, on every agent provider. The session shows Codex's messages, reasoning summaries, plan, commands, file changes and browser steps as they happen, `--json-stream` emits them as `tool_start`/`tool_end` events, and `/resume` reopens a run's Codex thread. Install with `pip install 'reverse-api-engineer[codex]'`, which brings its own Codex runtime, and sign in once with `codex login` or the Codex app. RAE runs Codex in its own home, `~/.reverse-api/codex`, whose `auth.json` links to your Codex sign-in, so your Codex config, MCP servers, hooks, skills and `AGENTS.md`, and the apps connected to your ChatGPT account, don't steer the agent and RAE's runs stay out of your Codex history. Set `codex_home` to run in a Codex home as it is. `codex_model` picks the model (`null`, the default, uses your account's), and `/settings` lists the models your account offers. `codex_effort` picks the reasoning effort, and `/effort` lists the levels the model offers. Like Claude, Codex reports the client it ran live, which shows the verified step and the client card. `agent --dry-run` checks the SDK and the sign-in, and reports `would_run.model: null` when Codex picks the model.
+- **Copy text from the session**: the session takes the mouse for the wheel and for clicking files and links, so the terminal could not select its text. Dragging over the conversation now selects it and copies it to the clipboard when you let go, with `pbcopy`, `wl-copy`, `xclip` or `xsel`, or through the terminal (OSC 52) otherwise and over SSH. A click without a drag still opens a link.
+- **Engineer mode names the run it works on**: the line above the input shows its id and prompt, by default your latest run with a HAR, and an engineer run's first line names the run it changes. `/engineer [run_id]` picks another one among the runs that have a HAR. A choice holds until another run is engineered or a new agent run captures one.
+
+### Removed
+- **Collector mode**: the `collector` command, the session's collector mode, the `collector_model` setting and the `collector` install extra. rae stays on turning a site's traffic into an API client. Existing configs and histories still load: an old `collector_model` is ignored, past collector runs stay in `/history`, and `./collected/` folders are left as they are.
+
+### Fixed
+- **Option+Delete in the session's input bar**: it deleted a single character, and on an empty bar it stopped the run, because the terminal sends it as Esc then Delete and the session acted on Esc at once. Esc now waits 50 ms for what follows, so Option+Delete deletes the word before the cursor and Option+arrows sent as Esc b / Esc f jump by word, while a lone Esc still stops the run or closes a menu.
+- **A re-engineered run keeps its cost**: its tokens and cost in `/history`, `list` and `show` add up every re-engineer instead of keeping only the last, so a run's cost still counts its capture.
+- The client card shows what its own run cost, not the session's spend so far; the chip under the input still shows the session's.
+- `/history` opened while a run wraps up waits for it, instead of listing that run's cost from before.
+- **A slow page no longer ends a Chrome DevTools MCP run**: a page that misses Chrome DevTools MCP's 10 second navigation timeout, as browserbase.com/careers does on a cold load, made the agent stop and ask the user to accept Chrome's connection prompt. The agent now opens the page again; only a timeout waiting for the browser connection means the prompt.
+- **Agent runs record their SDK**: `history`, `show` and replays in the session showed no SDK for agent runs, so a replayed card named the SDK the session was on. Runs now record it, and older runs read it from their SDK session.
+- **`--model` with another SDK**: `agent` and `engineer` only accepted Claude's model ids, so a Codex, OpenCode, Copilot or Cursor run could not pick its model per command. With another `sdk` configured, `--model` now takes that SDK's own model id.
+- **Leaving the session while a run stops**: a second `ctrl+c` while a run wraps up now quits once its cleanup is done, instead of repeating "still wrapping up", and a `ctrl+c` while rae waits for that cleanup on the way out still leaves the transcript in the terminal.
+
+## [0.15.0] - 2026-11-08
+
+### Changed
+- **Claude sessions are isolated from your Claude Code setup (#141)**: they no longer load your settings files, `CLAUDE.md`, hooks, plugins, permission rules or MCP servers, which could derail a run while it still reported `status: ok`. Set `claude_setting_sources` (for example `["user"]`) to load chosen layers again, such as when `~/.claude/settings.json` provides your authentication. `claude-agent-sdk` now needs 0.2.174 or later.
+- The Copilot SDK is now 1.0.
+- **chrome-mcp is the default agent provider** for new configurations. Existing `~/.reverse-api/config.json` files keep the provider they already store; switch with `/settings` or `"agent_provider": "auto"` for Playwright MCP with HAR recording.
+- Headed chrome-mcp runs check Chrome auto-connect (`DevToolsActivePort` plus an open port) before launching and fail with setup steps and `error_kind: config_invalid` instead of starting the agent. `agent --dry-run` reports the same check as an error.
+- `engineer <run_id>` on a run without a HAR stops before starting a model session: chrome-mcp runs get an explanation and `error_kind: misuse` with exit code 2, other runs name the missing HAR path.
+- Pin `chrome-devtools-mcp` to the 1.12 line and update the chrome-mcp prompt for its `pageId` tool arguments; the agent now opens its own tab.
+- `/resume` replays the run's conversation the way it looked live (prompts, steps, the agent's messages, the client card) before it waits for the follow-up, and switches from a conversation that only waits for one instead of asking for `/new` first.
+- `/settings` opens inside the session: one list with the settings rae offers there (SDK, agent provider, models, output and sync) and their values, enter flips a toggle or opens its choices, long lists filter as you type, and each change shows as `◇ setting  old → new`. OpenCode's providers and models load behind a list that keeps keystrokes from starting a run. The classic settings screen is gone.
+- `/help` says what rae does and lists the modes (the current one marked), every command and every key.
+- Lists and the command menu go around: down on the last item moves to the first, up on the first to the last.
+- A blank line parts the conversation from the input bar.
+- `--json-stream` `tool_start` events of Claude runs carry the tool call's `call_id`, as Cursor runs' already did.
+- Manual capture, the collector and OpenCode runs stay in the full-screen session instead of switching to the plain terminal. During a manual capture, closing the browser starts the engineering and `esc` stops while keeping the capture. Stopping an OpenCode run aborts its OpenCode session and its subagents, which kept working before.
+
+### Removed
+- `/messages`: `/resume` shows a past run's whole conversation, also for a run that saved no session and so cannot continue, and `/history` its details.
+
+### Fixed
+- An OpenCode server started by rae stops with rae even when rae is killed or its terminal is closed, and its whole process tree stops, not only the `npx` launcher, which could leave `opencode serve` listening.
+- In tool output, a line of binary data (such as a compressed response body) shows as "(binary data)", and a long line in a diff is cut instead of wrapping to the left edge.
+- The update notice no longer offers an older release: it appeared whenever PyPI's version differed from the installed one, as with 0.15.0 before its publication.
+- `agent --url` reaches the agent: its first message names the start URL, instead of the URL being checked and then dropped (#140).
+- Usage is counted once per turn, with the SDK's own cost, and the agent's and tools' text is printed as is instead of being read as markup.
+- Files under a symlinked output folder sync again.
+- `/effort` on a Claude model without the setting (Haiku 4.5) says that model has none, instead of calling effort a Claude setting.
+- A second `esc` while a run wraps up no longer cuts its cleanup short, which left the Claude CLI behind with a "Loop … that handles pid … is closed" warning and a false "interrupted".
+- An OpenCode catalog request that times out names the error instead of ending its message on a colon.
+- Resuming a run whose Claude Code session is gone says so once, in plain words, instead of the SDK's "returned an error result … (exit code: 1)" followed by advice to install Claude Code. That advice now only appears when Claude Code is missing.
+- A Claude error such as "Not logged in" shows once, not as an agent message, then an error, then "Agent analysis produced no result."
+- Steps name the tools of OpenCode, Copilot and Cursor (`bash`, `read`, `apply_patch`, `playwright-ses_…_browser_navigate`, Cursor's `mcp` wrapper…) the way they name Claude Code's, and a tool without its own wording shows its name and main argument instead of raw JSON.
+- The agent's task list shows as one plan per batch of changes, whatever the SDK calls it: Claude Code's current `TaskCreate` and `TaskUpdate` (which the session showed as separate steps, never as a list), `TodoWrite`, OpenCode's `todowrite`, Cursor's `updateTodos`, `write_todos`, `update_todos` and `update_plan`.
+- Long errors, notices, prompts and folder paths wrap under their own text instead of at the left edge.
+- In the session, an engineer run ends with one line naming its local copy (`./scripts`, or `./docs` for documentation, which also gets a line of its own), instead of the plain terminal's "decoding complete" lines repeating the client card.
+- `agent --json` and `engineer --json` report `status: error` (`engine_failure`) when the run ends without writing its client, instead of `ok` with a `script_path` that does not exist.
+- Playwright MCP prompt: `browser_run_code` is now `browser_run_code_unsafe`, and the nonexistent `browser_scroll` tool is no longer listed.
+- The Claude SDK message buffer is raised to 32 MB, so a large screenshot no longer aborts a run.
+- `list` and `show` report the cost of Claude, Copilot and Cursor runs. They used to read only `total_cost` or `cost`, while those engines record `estimated_cost_usd`, so the cost was always empty.
+- OpenCode runs on free or local models (`opencode/big-pickle`, Ollama) report a cost of $0. When OpenCode reported no cost, rae priced every unknown model as Claude Sonnet 4.6; it now estimates only for models with known prices, and short names such as `opus` are priced as the model they map to.
+- OpenCode runs report their cost and cache writes in `--json` usage (`total_cost_usd`, `cache_write_tokens`) and their cost in `/history` and `/resume`.
+- README: the `agent --json` usage fields are `total_cost_usd` and the cache token counts, not `total_cost`.
+- OpenCode runs follow their subagents: a subagent's tool calls show, its cost counts, and its permission requests are approved, so the run no longer waits forever on one.
+- An OpenCode step delivered twice counts its tokens and cost once.
+- An OpenCode run that its provider refuses for lack of credit or quota stops at once with the provider's message, instead of retrying until the request times out after 10 minutes.
+- `show` reports the cache token counts of Copilot, Cursor and OpenCode runs, which name them differently from Claude.
+- `/history` shows the cost of OpenCode runs recorded before this release.
+
+### Security
+- Manual capture requires Playwright 1.64.1 or later, which bundles Chromium 156, and the lockfile pins it. Playwright 1.58 bundled Chromium 145, which lacks the fixes for the Chrome vulnerabilities exploited in 2026. Manual capture uses your installed Chrome when it can, so keep Chrome up to date; after upgrading, run `playwright install chromium` for the Chromium it falls back to.
+- Agent runs start `rae-playwright-mcp@0.0.9` instead of whatever `@latest` resolves to, so a new publish of the MCP reaches users only through a rae release.
+- Manual capture's stealth Chromium no longer asks Chrome to turn off Site Isolation (`--disable-features=IsolateOrigins,site-per-process`); a later `--disable-features` flag already overrode that request.
+- Raise security minimums to aiohttp >=3.14.4, certifi >=2026.10.19, multidict >=6.9.1, OpenTelemetry API >=1.45.1, PyJWT >=2.15.0 and urllib3 >=2.8.0, and lock the patched versions. certifi drops the emSign root CAs whose intermediate keys were compromised.
+- Upgrade the Cursor bridge to `@cursor/sdk` 1.0.40 with Zod 4.6.7, fixing a Zod memory-exhaustion issue and removing the vulnerable undici dependency.
+- Upgrade the website to Next.js 16.4.3 to fix remote code execution, server-side request forgery, cache poisoning and denial-of-service vulnerabilities, and refresh Sharp, brace-expansion, source-map-js, undici, Zod and minimatch (a denial of service in the website's lint tooling) to patched versions.
+
+### Added
+- **Full-screen session**: `reverse-api-engineer` opens a full-screen session where the conversation scrolls above an input bar. The agent's text and reasoning stream as they come, tool steps are numbered with their output folded (ctrl+o unfolds it), and a client card appears once the agent has verified the client. The status row shows the run id, and the verified step lists the run's folder and its synced copy as clickable paths. Type `/` for the commands; pickers set the model, effort and mode. In a terminal, `agent`, `engineer` and `collector` open the session too; `agent` and `engineer` stay plain with `--json` or `--no-interactive`. The line-by-line prompt is gone; `/quit` and `/commands` still work as aliases of `/exit` and `/help`.
+- **`/resume`** reopens a past run's conversation on the SDK it ran on (Claude, Cursor, Copilot or OpenCode); your next message continues it. Agent and engineer runs save their SDK session from this release on.
+- **Claude 5.5 models**: Sonnet 5.5, Opus 5.5 and Haiku 5.5, with a configurable effort (`/effort`, ctrl+e, or `claude_effort` in the config). Sonnet 4.6 stays the default, and the Sonnet 4.6 and Haiku 4.5 ids are still accepted by `--model`.
+- **Agent skill**: `skills/reverse-api-engineer` teaches Claude Code, Codex, Cursor, OpenCode and other agents to drive the scripted CLI (preflight, capture, verify, iterate). Install with `npx skills add kalil0321/reverse-api-engineer`.
+
+## [0.14.0] - 2026-09-23
+
+### Security
+- Refresh vulnerable website transitive dependencies, including js-yaml, nanoid, undici, brace-expansion and Miniflare's Sharp dependency, with patched lockfile versions and overrides.
+- Upgrade the website to Next.js 16.3.3 and its Sharp image-processing dependency to 0.35.4 to address known vulnerabilities.
+
+### Added
+- **PowerShell 7+ output**: generate an `api_client.psm1` module and `Example.ps1`, with CLI execution through `pwsh` on Windows, macOS, and Linux.
+- **Live client validation**: an opt-in local test captures a fixture API, generates a Python or PowerShell client with a verified free OpenCode model, and checks fresh API data on replay. The manual `live_windows` CI option validates both languages using preinstalled Chrome and cached Python/npm dependencies, without downloading Chromium. Regular CI requires real PowerShell execution and CLI startup checks across all three operating systems.
+
+### Fixed
+- **Windows encoding and launch compatibility (#134)**: read prompts and persisted text as UTF-8; accept optional UTF-8 BOMs in configuration, history and HAR files; retain readable message records around corrupt lines and replace session history atomically to preserve the previous file if saving is interrupted. Preserve Unicode client output, including Python dependency-install retries, and report unsupported batch launch configurations accurately in JSON output.
+- Resolve Chrome profiles for Windows and Linux, pass npm/npx arguments through native Node entrypoints, and use the Maven project working directory to avoid passing special directory characters through batch arguments. Unsafe nonstandard batch launchers fail explicitly.
+- Stop the managed OpenCode process tree on Windows so shutdown releases its listening port. Add native Windows regression coverage and dedicated Chrome capture/shutdown plus Python/PowerShell generation and fresh-response replay checks.
+- Expose unexpected agent capture tracebacks through `RAE_DEBUG=1` on stderr, without adding diagnostics to JSON/NDJSON stdout.
+- Keep the website header pinned to the viewport during rapid scrolling on the homepage and documentation pages, while preserving the content offset. Add browser regression coverage to the website deployment workflow.
+- **PowerShell execution validation**: reject unsupported module names, missing `Example.ps1`, and script arguments that the example cannot forward, rather than silently running a different command. Generation instructions require portable module imports and terminating errors so failed API calls produce a nonzero exit status.
+- Refresh the locked Claude Agent SDK and MCP dependencies so the development environment also uses MCP 2.x and `httpx2`, without the legacy `httpx`, `httpx-sse`, and `httpcore` packages. Add subprocess smoke tests for CLI startup with legacy HTTP client imports blocked.
+- Restore the strict typing fixes from #125 and make the `mypy` CI job blocking. The original PR landed on an intermediate branch after its promotion PR had already merged, so the changes had not reached main.
+- Raise security minimums to Click >=8.3.3, aiohttp >=3.14.3, cryptography >=50.0.0, AnyIO >=4.14.2, PyJWT >=2.13.0, python-multipart >=0.0.31, Starlette >=1.3.1, HTTPX2 >=2.12.0 (which requires the patched HTTPCore2), and Markdownify >=0.14.1 / SoupSieve >=2.9.0 (collector extra). Export these floors in package metadata so upgrades cannot retain vulnerable versions that only the repository lockfile excluded.
+- Report agent provider runs that produce no result as failures: JSON/NDJSON emits an error result, and plain output prints the error to stderr; all exit with code 1. Preserve Claude/Cursor Ctrl+C as `interrupted` in non-interactive mode. Interactive Ctrl+C keeps exit code 0 and any completed partial result, including when the signal cancels an asyncio task. Programmatic cancellations propagate to asyncio callers and produce a CLI failure with exit code 1, while preserving partial results.
+
+### Compatibility
+- The secured cryptography dependency no longer supports Intel macOS or 32-bit Windows. Use Linux (including on Intel hardware), Apple Silicon macOS, or 64-bit Windows. Installing on the retired platforms may attempt an unsupported source build requiring Rust and OpenSSL development tools; this is not a supported installation path. Do not downgrade cryptography to restore old wheels. See the [upstream platform changes](https://cryptography.io/en/latest/changelog/#v49-0-0).
+- Click now requires version 8.3.3 or newer to fix [PYSEC-2026-2132](https://osv.dev/vulnerability/PYSEC-2026-2132). LiteLLM releases that pin `click==8.1.8` (including 1.83.7) cannot share an environment with this release. Use RAE's built-in pricing, run such LiteLLM releases in a separate environment, or select a LiteLLM release whose requirements allow the patched Click version. Optional LiteLLM pricing detection remains available only when its dependencies are compatible; do not downgrade Click to enable it.
+
+## [0.13.1] - 2026-08-30
+
+### Fixed
+- **`ModuleNotFoundError: No module named 'httpx'` on a fresh install**: `httpx` was imported at module top level in five modules but never declared as a dependency. It had always arrived transitively through `mcp`, which required `httpx` up to 1.x. `mcp` 2.0 switched to `httpx2`, so new installs resolving MCP 2.x stopped installing `httpx` and every CLI invocation died at import time, `--version` included. Environments created before `mcp` 2.0 kept working, which is why the break only appeared for new users. The package now uses `httpx2` (imported as `httpx`) and declares `httpx2>=2.5.0` explicitly. Installs resolving MCP 2.x share this client; environments retaining MCP 1.x also install its legacy `httpx` dependency. ([#122](https://github.com/kalil0321/reverse-api-engineer/issues/122))
+
+## [0.13.0] - 2026-07-27
+
+### Added
+- **`client_executed` json-stream event**: a non-interactive `--json`/`--json-stream` run is a single SDK turn end-to-end, so `result` only fires once the whole turn is over — a caller watching the stream had no earlier way to know a working, live-verified client already existed, even when the agent spent a long tail of that turn on unrelated busywork. `--json-stream` now emits `{"event": "client_executed", "script_path": "..."}` as soon as the agent successfully runs the generated client with its own language-specific run command, giving wrapper scripts a signal they can bound cost and time against. Emitted for both `engineer` and `agent`; Claude SDK only (OpenCode/Copilot/Cursor have separate streaming handlers). See the [scripted usage docs](https://reverseapi.dev/docs/cli/scripted-usage).
+
+### Changed
+- **Slimmer source distribution**: the sdist no longer ships the repo's binary banner/demo assets, the `examples/` and `design/` trees, or `uv.lock` — none of which are needed to build, install, or test the package (README images are served from GitHub, not the tarball). The published `.tar.gz` drops from ~1.0 MB to ~0.2 MB. The wheel is unchanged.
+
+## [0.12.0] - 2026-07-22
+
+### Changed
+- **Playwright is now an optional `[manual]` extra**: agent mode (the default) captures through `npx`-launched browser tooling (browser MCP servers or the `agent-browser` CLI) and never imports the Python Playwright package, so `playwright` and `playwright-stealth` moved out of the base dependencies into a `[manual]` optional-dependency group. This keeps the base install (and any runtime that bundles the package) lightweight. Manual capture mode now requires `pip install "reverse-api-engineer[manual]"` followed by `playwright install chromium`. Entering manual mode without the extra fails fast — before any run is recorded — with an actionable hint listing both steps, so a base-only install never leaves a phantom `manual` run in history.
+
+### Fixed
+- **Manual capture no longer wedges the REPL after a failed start**: if a capture failed to launch (for example a mistyped or scheme-less URL), Playwright's sync event loop was left running, so every subsequent prompt died in a loop with "asyncio.run() cannot be called from a running event loop". The browser is now torn down on a failed start, so the error is shown once and the prompt returns to normal.
+- **Scheme-less capture URLs are accepted**: entering a bare host such as `jobs.example.com/x` is now treated as `https://jobs.example.com/x` instead of failing with an invalid-URL error.
+- **CLI error text with brackets renders in full**: error messages are escaped before Rich renders them, so hints like `reverse-api-engineer[manual]` are no longer partially swallowed as markup.
+
+## [0.11.0] - 2026-07-22
+
+### Changed
+- **OpenCode setup**: RAE now reuses an existing server or downloads/starts `opencode-ai@latest` through `npx` without requiring a global OpenCode install, with configurable auto-start, package, and base URL settings plus password inheritance. Fresh configurations default to free `opencode/big-pickle`. Provider/model pairs are validated before session creation, invalid configurations include current free-model suggestions, and older compatible servers show an upgrade warning. `/settings` shows a loading spinner, uses a live searchable provider/model picker, saves the pair atomically, and remains open across related changes until Back is selected.
+- **Ollama setup**: OpenCode mode can discover tool-capable Ollama models, start an installed daemon, and inject provider configuration without modifying the user's `opencode.json`.
+
+### Fixed
+- **"Prompt is too long" session deadlock** (#93): Claude SDK sessions now run with proactive auto-compaction configured per the Claude Code docs — `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (capped by the CLI to the model's real context window) plus `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=85` — leaving enough headroom that a max-size HAR read landing near the threshold no longer jumps straight past the hard context limit. Both variables are respected if the user sets them explicitly. When the window is exhausted anyway, the error is now explained (progress is saved on disk; start a new run for the same target to continue) and the follow-up prompt is no longer offered on the dead session, where every further message would fail with the same error.
+- **OpenCode permissions**: Permission V2 events now reply through OpenCode's current, non-deprecated permission endpoint while retaining compatibility with older servers.
+- **OpenCode errors**: Known authentication, model configuration, and temporary provider-availability failures now produce one actionable message without the unexpected-error issue prompt.
+- **OpenCode TUI prompt echo**: Streamed text is now restricted to assistant message IDs, preventing RAE's internal browser and reverse-engineering instructions from appearing as model output.
+- **`run`/`list` now work for every output language**: `discover_scripts()` previously only found `.py` files, so `reverse-api-engineer run <run_id>` failed with "No Python scripts found" for JS/TS/Go/Java/C#/PHP/Ruby/C clients. Discovery now covers all supported extensions (excluding build dirs and the vendored cJSON sources), and the run command dispatches to the right toolchain per language (compile+execute for C), with a clear error when the required tool isn't on PATH.
+- **Windows-safe run-command quoting**: the Java/C#/PHP/Ruby/C run commands quoted paths with POSIX-only `shlex.quote`, which cmd.exe/PowerShell parse incorrectly for paths containing spaces. Paths are now quoted per-platform (`subprocess.list2cmdline` on Windows).
+
+### Added
+- **Go output language**: `output_language: "go"` is now supported alongside python/javascript/typescript, generating a standard-library-first (`net/http`, `encoding/json`) Go program, with the same auth-hardcoding/refresh and bot-detection-fallback guidance as the other languages.
+- **Java output language**: `output_language: "java"` is now supported alongside python/javascript/typescript, generating a small Maven project using `java.net.http.HttpClient` (JDK 11+, no HTTP library dependency) and Gson for JSON, with the same auth-hardcoding/refresh guidance as the other languages.
+- **C# output language**: `output_language: "csharp"` is now supported alongside python/javascript/typescript, generating a minimal .NET project using `System.Net.Http.HttpClient` and `System.Text.Json` (both part of the .NET 5+ base class library — no NuGet dependency needed), with the same auth-hardcoding/refresh guidance as the other languages.
+- **PHP output language**: `output_language: "php"` is now supported alongside python/javascript/typescript, generating a script using the `curl` and `json_encode`/`json_decode` core extensions (`ext-curl`, `ext-json` — no Composer dependency needed), with the same auth-hardcoding/refresh guidance as the other languages.
+- **Ruby output language**: `output_language: "ruby"` is now supported alongside python/javascript/typescript, generating a script using `net/http` and `json` (both part of Ruby's standard library — no gem/Bundler dependency needed), with the same auth-hardcoding/refresh guidance as the other languages.
+- **C output language**: `output_language: "c"` is now supported alongside python/javascript/typescript, generating a program using `libcurl` for HTTP and a vendored `cJSON` for JSON (C has neither in its standard library), compiled and run as a single `{run_command}` step, with the same auth-hardcoding/refresh guidance as the other languages.
+
+## [0.10.0] - 2026-06-01
+
+### Changed
+- **Packaging metadata**: Refreshed the package `description`, `keywords`, and `classifiers`, bumped `Development Status` to `4 - Beta`, and updated the project URLs (`Homepage` now points to https://reverseapi.dev, added `Documentation` and `Changelog`)
+- **Source distribution excludes `website/`**: The marketing site under `website/` (Astro/Cloudflare Pages source) is now excluded from the sdist build so it no longer ships inside the PyPI package; the wheel already only packaged `src/reverse_api`
+
+### Added
+
+- **`agent_provider: "agent-browser"`**: Shell-driven **[Vercel agent-browser CLI](https://github.com/vercel-labs/agent-browser)**—RAE prefers an `agent-browser` binary on `PATH`, otherwise runs **`npm install -g <pin>`** (with a console notice), validates **`--help`**, and only then falls back to **`npx -y <pin>`** if npm cannot install. Prompts embed the resolved shell prefix plus **`skills get …` / `skills list`**, HAR flows, and optional `agent_browser_notes`. No bundled browser MCP shim; pin via `agent_browser_npx_package` / `RAE_AGENT_BROWSER_PACKAGE`.
+
+### Added
+- **Cursor SDK support**: Added `sdk=cursor` / `--sdk cursor` engineering support through a bundled Node bridge around the Cursor TypeScript SDK. Cursor runs use the configured Cursor model (default `composer-2`), accept MCP server configuration, resume Cursor agents across follow-up turns, and normalize streamed tool output plus token usage into the existing TUI/message-store flow
+- **Cursor bridge packaging**: Bundled the `src/reverse_api/cursor_bridge/` Node package so `@cursor/sdk` dependencies can be installed on demand when Cursor mode is first used
+
+### Fixed
+- **Manual REPL model resolution**: Follow-up engineering now resolves model settings from the selected SDK, including Cursor, OpenCode, and Copilot
+- **Cursor streaming**: Buffered Cursor model text before rendering so streamed deltas are shown as coherent blocks and no longer produce stray `..` lines or bridge hangs
+- **Sync test compatibility**: Restored the temporary-file helper used by the existing sync test surface
+
+### Removed
+- **Chrome extension and native messaging host**: The `chrome-extension/` workspace and the Python `native_host` module are removed. The `install-host`, `uninstall-host`, and `run-host` CLI subcommands no longer exist. The extension was an experimental/WIP capture surface that never reached parity with `manual` and `agent` modes; deleting it also eliminates a JS dev-tooling supply chain (vite, postcss, picomatch, rollup, prismjs) and the corresponding dependabot churn
+
+### Security
+- **Drop `[pricing]` extra (litellm)**: LiteLLM 1.83.7 patched 3 advisories (1 critical SQLi + 2 high RCE/SSTI) but hard-pins `click==8.1.8`, which would force a click downgrade for all users. The vulnerable code paths are all in the LiteLLM proxy server, which we do not run — we only used litellm as a library for cost lookups. Removed the optional dependency entirely; `pricing.py` keeps a graceful import-detect path so users who install `litellm` independently still get the extended model coverage
+- **cryptography** `>=46.0.7` (was `>=46.0.6`) — patches a buffer overflow on non-contiguous buffer inputs (medium)
+- **pytest** `>=9.0.3` (was `>=8.0.0`) — patches vulnerable `tmpdir` handling (medium, dev only)
+- **python-multipart** `>=0.0.27` (was 0.0.22 transitively via `mcp`) — patches DoS via large multipart preamble/epilogue (medium)
+
+## [0.8.0] - 2026-05-06
+
+### Added
+- **Agent-friendly CLI surface**: First-class non-interactive mode for invocation from other agents and scripts
+  - **`--json`** on `agent` and `engineer`: emit a single structured JSON result (run_id, status, artifacts, usage, error info) instead of streaming TUI output. Auto-suppresses follow-up prompts and TTY-detects at REPL entry
+  - **`--no-interactive`** on `engineer`: skip the follow-up loop without forcing JSON output
+  - **`agent --dry-run`**: pre-flight validation (config, network, MCP availability) without launching a browser
+  - **`agent --headless`**: run agent mode without a visible browser window (manual mode keeps the human-in-the-loop and does not accept `--headless`)
+  - **`--json-schema-version`**: explicit version string (`v2`) on JSON output so callers can pin their parser
+  - **Stable usage normalization** and **`error_kind` enum**: machine-readable error categories and consistent token/cost shapes across SDKs
+- **`engineer --prompt`** and **`engineer --fresh`** CLI flags: replace the equivalent `@id <run_id> [--fresh] <prompt>` REPL syntax. With `--fresh`, `--prompt` fully replaces the captured run's goal; without `--fresh`, it layers additional instructions on top
+- **`--help` epilogs**: expanded help output with examples for every subcommand
+
+### Changed
+- **Prompts**: extracted to standalone markdown templates under `src/reverse_api/prompts/` for easier review and iteration; LLM guidelines tightened
+- **Banner**: replaced the SVG banner with a new painted-ruins JPG
+
+### Removed
+- **`browser-use` and `stagehand` agent providers**: Both retired due to upstream churn. Agent mode now offers only `auto` (Playwright MCP) and `chrome-mcp` (Chrome DevTools MCP). Configs with `agent_provider` set to `browser-use` or `stagehand` migrate to `auto`; the `browser_use_model` and `stagehand_model` keys are dropped silently. The `[agent]` optional-dependency extra is removed
+- **Tag system (`@record-only`, `@codegen`, `@id`, `@docs`, `@help`)**: The inline tag syntax inside REPL prompts has been removed. Surviving capabilities have first-class CLI flags / arguments instead:
+  - `@record-only` → `manual --no-engineer` (already existed)
+  - `@id <run_id>` → `engineer <run_id>` (positional, already existed)
+  - `@id <run_id> <prompt>` → `engineer <run_id> --prompt "..."`
+  - `@id <run_id> --fresh <prompt>` → `engineer <run_id> --fresh --prompt "..."`
+  - `@codegen` and Playwright-action recording: removed entirely with the `ActionRecorder` and `playwright_codegen` modules (low usage, replaced by the standard capture+engineer flow)
+  - `@docs` (OpenAPI generation): removed for now; will return as a dedicated `docs` subcommand in a follow-up
+  - `@help`: superseded by the existing `/help` slash command in the REPL
+- **`--reverse-engineer/--no-engineer` flag on `agent`**: was parsed but never propagated to the auto-capture path — removed. Agent mode runs an integrated capture + engineering pipeline; use `manual --no-engineer` for HAR-only recordings
+
+### Fixed
+- **`engineer --json`**: emits JSON even when `RUN_ID` is missing (previously fell through to TUI error)
+- **Follow-up prompt**: suppressed in `--json` / `--no-interactive` mode so non-interactive callers never block on stdin
+
+## [0.7.1] - 2026-04-06
+
+### Fixed
+- **Packaging**: Exclude `.claude/worktrees/`, `.claude/plans/`, and demo GIFs from sdist (29MB → 503KB)
+
+## [0.7.0] - 2026-04-06
+
+### Added
+- **`run` command**: Execute generated scripts directly from the CLI with `reverse-api-engineer run <id|name>`. Supports fuzzy name matching, `--ls` to list scripts, `--file` to pick a specific script, and `--` to pass arguments through to the script
+- **Shared venv**: Scripts run inside a shared venv at `~/.reverse-api/runs/.venv` with `requests` pre-installed. Per-run `requirements.txt` is installed on top automatically
+- **Auto-install missing imports**: When a script fails with `ModuleNotFoundError`, offers to install the missing package and retry
+
+### Security
+- **litellm** >=1.83.0 — fixes critical OIDC auth bypass + high privilege escalation
+- **requests** >=2.33.0 — fixes insecure temp file reuse
+- **aiohttp** >=3.13.4 — fixes header injection, SSRF, DoS vulnerabilities
+- **pygments** >=2.20.0 — fixes ReDoS
+- **cryptography** >=46.0.6 — fixes incomplete DNS constraint enforcement
+
+## [0.6.0] - 2026-04-01
+
+### Added
+- **Chrome DevTools MCP agent provider (`chrome-mcp`)**: Agent mode can drive the browser through [Chrome DevTools MCP](https://www.npmjs.com/package/chrome-devtools-mcp) (`--autoConnect`, optional `--no-usage-statistics`) with a dedicated system prompt and SDK wiring alongside the existing Playwright MCP path
+
+### Changed
+- **Agent provider selection**: CLI settings and mode flow distinguish **auto (Playwright MCP)** from **chrome-mcp (Chrome DevTools MCP)**
+- **Packaging**: Source distributions exclude local demo video, packed Chrome extension zip, store-asset screenshots, and per-machine `.claude/settings.local.json` files so PyPI artifacts stay small (wheel unchanged: `src/reverse_api` only)
+
+### Fixed
+- **Tool result blocks** (engineer / agent streaming): When `content` is empty, fall back to `result` or `output` on tool-result blocks so alternate SDK shapes still surface output in the UI and message store
+- **Process title**: Set when the CLI module loads so the terminal shows `reverse-api` earlier in startup
+- **Follow-up prompt**: Flush local sync before reading follow-up input so state is up to date
+- **Tests**: `ClaudeAutoEngineer` analyze tests now use real `claude_agent_sdk` message types (so `isinstance` checks in the streaming loop match) and stub `_prompt_follow_up` to avoid the interactive follow-up path
+
+### Documentation
+- **README**: Agent mode demo GIF
+
+## [0.5.0] - 2026-03-17
+
+### Added
+- **Follow-up chat**: After a run completes, type follow-up messages to iterate in the same session without creating new run IDs or folders. Press Enter to finish
+- **Abort run (Ctrl+C)**: Gracefully cancel a running agent/engineer session and return to the REPL instead of exiting the app
+- **AskUserQuestion free mode**: All select/checkbox prompts now include "Other (type your answer)" so users can always provide free-text input. Updated agent prompt to document free-form, multi-select, and multi-question capabilities
+- **Random task suggestions (Ctrl+R)**: Press Ctrl+R in agent mode to fill the prompt with a random curated task idea. Press again to cycle
+
+### Fixed
+- **Usage tracking across follow-ups**: Token counts now accumulate across all turns in a session instead of being overwritten by the last turn
+- **Agent mode follow-up**: Auto engineer (agent mode) was using a copy-pasted streaming loop without follow-up support; now reuses the shared conversation loop
+
+## [0.4.5] - 2026-03-15
+
+### Fixed
+- **Stream closed errors (#51)**: Reverted from `query()` to `ClaudeSDKClient` which maintains a persistent bidirectional connection, eliminating "Error in hook callback hook_0: Stream closed" errors. The original AUQ fix (v0.4.3) unnecessarily switched APIs — only the `can_use_tool` callback signature needed updating
+- **CLAUDECODE env var leak**: Clear inherited `CLAUDECODE` env var from CLI subprocess to prevent nested session interference when running inside Claude Code
+- **CLI stderr noise**: Filter minified JS stack traces into a single clean error line (use `DEBUG=1` for full output)
+
+### Changed
+- **claude-agent-sdk**: Bumped minimum version to 0.1.48
+- **Agent mode**: No longer prompts for URL (agent navigates autonomously)
+- **Header UI**: Version and task labels now use mode-specific colors (agent=coral, engineer=blue, collector=gold)
+
+## [0.4.4] - 2026-03-15
+
+### Fixed
+- **Stream closed errors (#51)**: Partial fix using `query()` with env var workarounds (superseded by v0.4.5)
+
+## [0.4.3] - 2026-03-12
+
+### Fixed
+- **AskUserQuestion interactive prompt**: Fixed interactive questionary UI not rendering in engineer and agent modes. Switched from `ClaudeSDKClient` to `query()` function, as `ClaudeSDKClient` silently auto-approves `AskUserQuestion` without triggering the `can_use_tool` callback
+
+## [0.4.2] - 2026-03-12
+
+### Fixed
+- **Engineer client resolution**: Prefer the active engineer client recorded in session history over config defaults, preventing iterative edits from switching to the wrong file when multiple language clients exist
+
+## [0.4.1] - 2026-03-12
+
+### Added
+- **`show` CLI subcommand**: View details of a specific run by ID
+- **Chrome Extension improvements**: Multi-session support, codegen recording, side panel UX overhaul
+  - Session isolation fixes to prevent capture data bleeding across sessions
+  - Message persistence across panel reloads and session switches
+  - Traffic list with expandable request details and clear button
+  - Restricted page detection with user feedback
+  - ANSI escape code stripping in terminal output
+  - PrismLight language fallback for unregistered languages
+  - Bundle size reduced from 1112KB to 436KB (removed shiki, lucide-react, ansi-to-react, @base-ui/react)
+- **Mintlify API client example**
+
+### Changed
+- **Background update check**: Version check now runs in a background thread to avoid blocking CLI startup
+
+### Fixed
+- **Engineer language preservation**: Iterative edits now preserve the original output language instead of resetting
+- **Native host Gatekeeper handling**: Scoped xattr to the actual claude-code package directory
+- **Codegen selector escaping**: Dynamic attribute values now escaped with CSS.escape() to prevent broken selectors
+- **Chrome Extension manifest**: Removed unused `scripting` permission; pinned devicon CDN to v2.16.0
+
+## [0.4.0] - 2026-03-10
+
+### Added
+- **`list` CLI subcommand**: Non-interactive command to list generated scripts and runs
+  - Rich table output (compact and full modes) and JSON output (`--json`)
+  - Filter by mode (`--mode`), model (`--model`), prompt search (`--search`), and limit (`--limit`)
+  - Shows script directory paths, file counts, and local path detection
+
+## [0.3.3] - 2026-03-10
+
+### Added
+- **GitHub Copilot SDK**: Third SDK option for reverse engineering using GitHub Copilot
+  - New `CopilotEngineer` for HAR analysis via Copilot subscription (cost: $0)
+  - Auto mode support with MCP browser integration via Copilot SDK
+  - Interactive `AskUserQuestion` tool support for Copilot sessions
+  - Permission handler and tool use hooks for agent visibility
+  - Install with: `pip install 'reverse-api-engineer[copilot]'`
+- **Comprehensive Test Suite**: 593 tests achieving 97.4% code coverage
+
+### Changed
+- **Claude Model Updates**: Updated from Claude 4.5 to Claude 4.6 (Opus and Sonnet)
+- **Sync Filtering**: Unified sync filtering logic with relative paths; excludes `node_modules`
+- **TUI Improvements**: Reduced thinking truncation for better agent visibility
+
+### Fixed
+- **Python 3.11 Compatibility**: Fixed multi-line f-string expressions that required Python 3.12+
+- **Thread Safety**: Used `loop.call_soon_threadsafe` for Copilot SDK event callbacks
+- **Session Timeouts**: Added 10-minute timeout protection for Copilot session completion
+- **Resource Cleanup**: Ensured `CopilotClient` is always stopped via `try/finally`
+- **HAR Recording**: Changed HAR recording content mode to embed and optimized file saving
+
+## [0.3.2] - 2026-01-15
+
+### Added
+- **Update Notifications**: CLI now checks for newer versions on startup and displays update prompt
+
+### Changed
+- **README Improvements**: Redesigned badge styling with flat-square style and centered layout
+- **Banner Redesign**: Modernized SVG banner with centered content and improved visual hierarchy
+- **Font Compatibility**: Fixed banner fonts for better GitHub rendering support
+
+### Fixed
+- **Banner Display**: Corrected package name display and font rendering in GitHub
+
+## [0.3.1] - 2026-01-15
+
+### Added
+- **Chrome Extension (WIP)**: Beta support for capturing browser traffic via Chrome extension
+  - Alternative to Playwright browser for HAR capture
+  - Works with existing browser sessions
+  - Note: This feature is work in progress and may have limitations
+
+### Fixed
+- **OpenCode Server**: Fixed error formatting and connection handling
+- **Process Title**: Added process title for better identification in system monitors
+- **Auth Error Handling**: Improved handling of authentication failures
+
+## [0.3.0] - 2026-01-10
+
+### Added
+- **Collector Mode**: New AI-powered web data collection mode using Claude Agent SDK
+  - Natural language prompts to collect structured data from any website
+  - Automatic export to JSON and CSV formats
+  - Generates README with collection metadata and schema
+  - Uses WebFetch, WebSearch, and file tools for autonomous collection
+- **Playwright Codegen**: Generate automation scripts from recorded browser actions
+  - Captures clicks, fills, key presses, and navigations
+  - Produces stealth-enabled Playwright scripts with proper escaping
+  - Deduplicates redundant fill actions and navigations
+- **@docs Tag**: Generate OpenAPI specifications from HAR files
+  - Standalone usage: `@docs` to generate from latest run
+  - With run ID: `@docs run_id` to generate from specific run
+- **@record-only Tag**: Record HAR files without reverse engineering step
+- **AskUserQuestion Tool**: Interactive prompts during engineering sessions
+- **JS/TS Client Generation**: Support for generating JavaScript/TypeScript API clients
+
+### Changed
+- **Improved HAR Filtering**: Better path-based filtering for skip patterns
+- **Enhanced Price Computation**: Fixed pricing for OpenCode provider
+- **Centralized Run Resolution**: Refactored latest run parsing logic
+
+### Fixed
+- **Selector Escaping**: Fixed attribute selector escaping for special characters in `name`, `data-testid`, `aria-label`, and `placeholder` values
+- **Null Checks in Codegen**: Added validation for `action.selector` and `action.value` to prevent crashes
+- **CSV Export**: Fixed DictWriter error when items have inconsistent keys
+- **HAR Validation**: Validate HAR file exists when using @docs tag
+- **Path Normalization**: Fixed path handling in various utilities
+
+## [0.2.10] - 2026-01-03
+
+### Added
+- **Claude Code Plugin**: Official plugin for seamless integration with Claude Code CLI
+  - Three operation modes: manual browser capture, autonomous agent browsing, and re-engineering from HAR files
+  - Comprehensive skill system with progressive disclosure of reverse engineering techniques
+  - Slash commands for quick access: `/agent`, `/engineer`, `/manual`
+  - Reference documentation for HAR analysis and authentication patterns
+  - API client templates for common patterns
+- **Example API Clients**: Added production-ready examples for major platforms
+  - Apple Jobs API client with field extraction utilities
+  - Ashby Jobs API client with comprehensive endpoint coverage
+  - Ikea API client for product search and catalog browsing
+  - Uber Careers API client with pagination support
+- **Engineer Tagging System**: Enhanced metadata tracking for generated API clients
+  - Automatic tagging of runs with descriptive identifiers
+  - Improved organization and searchability of reverse-engineered APIs
+
+### Changed
+- **Enhanced Auto Mode**: Improved MCP browser integration with better error handling
+- **Better Sync Fallback**: More robust file synchronization with fallback mechanisms
+- **Code Quality**: Comprehensive formatting and linting improvements across codebase
+
+### Fixed
+- **Agent Mode Screenshots**: Reduced unnecessary screenshot captures in agent mode
+- **Sync Error Handling**: Fixed sync fallback when primary sync method fails
+- **Path Handling**: Corrected CLAUDE.md documentation paths
+- **Import Errors**: Fixed missing imports in various modules
+
+## [0.2.9] - 2025-12-30
+
+### Added
+- **Real-time File Sync**: Watch and automatically sync generated scripts to local directory
+  - Debounced file watching with configurable delay (default 500ms)
+  - Visual feedback for sync operations in terminal UI
+  - Prevents overwriting existing directories by appending counter suffix
+- **MCP Browser Integration**: Native integration with `rae-playwright-mcp` for auto mode
+  - Seamless browser automation via Model Context Protocol
+  - Works with both Claude SDK and OpenCode SDK
+  - Combines browser control and real-time reverse engineering in single workflow
+- **CLAUDE.md Autogeneration**: Automatic generation of project documentation for Claude Code
+
+### Changed
+- **Enhanced Settings Management**: Improved settings configuration and UI
+- **Better Sync Error Handling**: Improved error handling and resource cleanup for sync operations
+
+### Fixed
+- **Sync Directory Overwrite**: Fixed issue where sync would overwrite existing directories
+- **Sync Resource Leaks**: Fixed memory leaks when sync errors occurred
+- **UI Improvements**: Various UI fixes and enhancements
+
+## [0.2.8] - 2025-12-28
+
+### Added
+- **3-Tier Pricing Fallback System**: Automatic pricing lookup for 100+ LLM models
+  - Local pricing for common models (highest priority)
+  - Optional LiteLLM integration for extended coverage (install with `pip install 'reverse-api-engineer[pricing]'`)
+  - Default fallback to Claude Sonnet 4.5 pricing
+- **New Model Pricing**: Added pricing for Gemini 3 and Claude thinking series models
+
+### Changed
+- **Enhanced OpenCode Prompts**: Improved prompt handling for code generation
+- **Better Folder Naming**: Folder name generation with OpenCode SDK
+- **Antigravity Documentation**: Added comprehensive documentation for free models via Antigravity
+
+### Fixed
+- Model name mismatch in pricing lookups
+- Pricing computation for extended thinking models
+
+## [0.2.7] - 2025-12-27
+
+### Changed
+- **Version management**: Implemented single source of truth for versioning
+  - Version now defined only in `pyproject.toml`
+  - `__init__.py` reads version dynamically using `importlib.metadata`
+  - Eliminates need to manually update version in multiple files
+  - Added `RELEASING.md` with release process documentation
+
+## [0.2.6] - 2025-12-27
+
+### Fixed
+- **Version flag**: Updated `__version__` to 0.2.6 to ensure `--version` displays correctly
+- **OpenCodeEngineer initialization**: Refactored to properly pop specific kwargs (`opencode_provider` and `opencode_model`) before passing to parent class
+  - Ensures only relevant arguments are sent to BaseEngineer
+  - Improves initialization logic clarity and prevents unintended argument passing
+
+### Changed
+- **README improvements**: Added table of contents and removed repetitive sections for better readability
+
+## [0.2.5] - 2025-12-27
+
+### Fixed
+- Initial release attempt (superseded by 0.2.6 due to missing version flag update)
+
+## [0.2.4] - 2025-12-27
+
+### Fixed
+- **Version string**: Fixed `--version` flag to correctly display 0.2.4 instead of outdated 0.2.0
+  - Previous release (0.2.3) was built with stale bytecode cache
+  - Added clean build script (`scripts/clean_build.sh`) to prevent future stale builds
+
+## [0.2.3] - 2025-12-27
+
+### Changed
+- **Version display**: Fix hardcoded version display
+- **Logs display**: Remove agent logs, claude agent sdk logs
+- **Browser-use installation**: Better instructions on how to install bu for agent mode
+
+## [0.2.2] - 2025-12-26
+
+### Changed
+- **Better HAR Recording**: Improved HAR file recording and capture functionality
+
+## [0.2.1] - 2025-12-26
+
+### Added
+- **Stagehand Agent Support**: Added Stagehand as an alternative agent provider alongside browser-use
+  - Supports OpenAI Computer Use models (e.g., `computer-use-preview-2025-03-11`)
+  - Supports Anthropic Computer Use models (e.g., `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`, `claude-opus-4-5-20251101`)
+- **Separate Model Configurations**: Enhanced settings system with independent model configurations
+  - `claude_code_model`: Model for Claude SDK (renamed from `model`)
+  - `opencode_provider`: Provider for OpenCode SDK (e.g., "anthropic", "openai", "google")
+  - `opencode_model`: Model for OpenCode SDK
+  - `browser_use_model`: Model for browser-use agent provider
+  - `stagehand_model`: Model for stagehand agent provider
+
+### Changed
+- **Improved Settings Management**: Separated model configurations for different SDKs and agent providers
+  - Each SDK and agent provider now has its own independent model setting
+  - Settings menu updated with clearer options for each component
+- **Better Configuration Isolation**: OpenCode model settings no longer interfere with Claude SDK settings
+- **Backward Compatibility**: Automatic migration of old config files to new structure
+
+### Fixed
+- Fixed issue where OpenCode model settings were being overridden by Claude SDK model settings
+- Fixed model configuration conflicts between different SDKs and agent providers
+
+## [0.2.0] - 2025-12-25
+
+### Added
+- **OpenCode SDK Support**: Native integration with OpenCode SDK for more flexibility in reverse engineering workflows
+- **Agent Mode**: Fully automated browser interaction using AI agents (browser-use) with support for multiple LLM providers
+  - Browser-Use LLM (default)
+  - OpenAI models (gpt-4, gpt-3.5-turbo, etc.)
+  - Google models (gemini-pro, gemini-1.5-pro, etc.)
+- **Multi-Provider Agent Support**: Configure agent models via settings with automatic API key detection
+
+### Changed
+- Improved UX with better CLI interactions and mode cycling
+- Enhanced settings management for model, agent model, SDK, and output directory configuration
+- Better error handling and user feedback throughout the application
+
+## [0.1.0] - 2025-12-22
+
+### Added
+- Initial release
+- Browser automation with Playwright and stealth mode
+- HAR recording and capture
+- AI-powered API client generation using Claude
+- Interactive CLI with manual and engineer modes
+- Session history and cost tracking
+- Production-ready code generation with type hints and documentation

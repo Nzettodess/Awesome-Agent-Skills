@@ -1,0 +1,251 @@
+---
+icon: grid-4
+---
+
+# Plugins
+
+This directory contains comprehensive documentation for all 13 plugins in the Context Engineering Kit. Each plugin is designed to enhance Claude Code with specific capabilities focused on code quality, development workflows, and continuous improvement.
+
+## Quick Navigation
+
+- [Reflexion](reflexion/) - Introduces feedback and refinement loops to improve output quality.
+- [Spec-Driven Development](sdd/) - Introduces commands for specification-driven development, based on Continuous Learning + LLM-as-Judge + Agent Swarm. Achieves **development as compilation** through reliable code generation.
+- [Review](review/) - Introduces code and PR review commands and skills using multiple specialized agents with impact/confidence filtering.
+- [Git](git/) - Introduces commands for commit and PR creation.
+- [Test-Driven Development](tdd/) - Introduces commands for test-driven development and common anti-patterns, plus skills for testing using subagents.
+- [Subagent-Driven Development](sadd/) - Introduces skills for subagent-driven development, which dispatches a fresh subagent for each task with code review between tasks, enabling fast iteration with quality gates.
+- [Domain-Driven Development](ddd/) - Introduces commands to update CLAUDE.md with best practices for domain-driven development, focused on code quality, and includes Clean Architecture, SOLID principles, and other design patterns.
+- [FPF - First Principles Framework](fpf/) - Introduces structured reasoning using ADI cycle (Abduction-Deduction-Induction) with knowledge layer progression. Uses workflow command pattern with fpf-agent for hypothesis generation, verification, and auditable decision-making.
+- [Kaizen](kaizen/) - Inspired by Japanese continuous improvement philosophy, Agile and Lean development practices. Introduces commands for analysis of root causes of issues and problems, including 5 Whys, Cause and Effect Analysis, and other techniques.
+- [Customaize Agent](customaize-agent/) - Commands and skills for writing and refining commands, hooks, and skills for Claude Code. Includes Anthropic Best Practices and [Agent Persuasion Principles](https://arxiv.org/abs/2508.00614) that can be useful for sub-agent workflows.
+- [Docs](docs/) - Commands for analyzing projects, writing and refining documentation.
+- [Tech Stack](tech-stack/) - Rules for language-specific best practices, automatically applied when working on matching file types.
+- [MCP](mcp/) - Commands for setting up well-known MCP server integrations when needed and updating the CLAUDE.md file with requirements to use MCP servers in the current project.
+
+## Installation
+
+All plugins follow the same installation pattern:
+
+```bash
+# Add the marketplace (one-time setup)
+/plugin marketplace add NeoLabHQ/context-engineering-kit
+
+# Install a specific plugin
+/plugin install <plugin-name>@NeoLabHQ/context-engineering-kit
+```
+
+See individual plugin documentation for specific installation commands and verification steps.
+
+## Overview by Category
+
+### Quality & Refinement
+
+#### Reflexion
+
+Self-refinement framework that introduces feedback and refinement loops to improve output quality.
+
+**Key Features:**
+
+* Reflect on previous responses
+* Multi-perspective critique with debate
+* Memory updates with insights
+
+**When to use:** After completing any task to verify quality and identify improvements.
+
+[Full Documentation](reflexion/)
+
+#### Review
+
+Comprehensive code review using multiple specialized agents for thorough quality evaluation.
+
+**Key Features:**
+
+* Multi-agent review (bug hunter, security auditor, test coverage reviewer, etc.)
+* Local changes review
+* Pull request review
+* Triage changeset files list to pick the top most important files for human reviewer, to decrease amount of files that need to review before approving it.
+
+**When to use:** Before committing changes or creating pull requests.
+
+[Full Documentation](review/)
+
+### Development Workflows
+
+#### Test-Driven Development
+
+TDD methodology with anti-pattern detection and testing best practices.
+
+**Key Features:**
+
+* TDD workflow guidance
+* Common anti-patterns awareness
+* Testing subagent skills
+* Testing-strategy generation manual 
+
+**When to use:** When implementing new features with test-first approach.
+
+[Full Documentation](tdd/)
+
+#### Subagent-Driven Development
+
+Execution framework for parallel/sequential task dispatch, competitive generation, and multi-agent evaluation with quality gates.
+
+**Key Features:**
+
+* **Execution patterns**: parallel (`do-in-parallel`), sequential (`do-in-steps`), competitive (`do-competitively`), exploration (`tree-of-thoughts`)
+* **Evaluation**: single judge (`judge`) or multi-judge debate (`judge-with-debate`)
+* Fresh context isolation per task
+* Quality gates with code review between tasks
+* Multi-agent architecture patterns (supervisor, peer-to-peer, hierarchical)
+
+**When to use:** For complex features requiring multiple independent tasks, competitive solution generation, or when single-agent context limits are exceeded.
+
+[Full Documentation](sadd/)
+
+#### Spec-Driven Development
+
+Comprehensive Spec-Driven Development workflow using specialized agents for each phase.
+
+**Key Features:**
+
+* Complete workflow: `/add-task` → `/plan-task` → `/implement-task`
+* Eight specialized agents: `researcher`, `code-explorer`, `business-analyst`, `software-architect`, `tech-lead`, `developer`, `code-reviewer`, `tech-writer`
+* Five model-assigned planning phases — research, codebase analysis and business analysis in parallel, then architecture synthesis, then decomposition — each behind an LLM-as-Judge quality gate, then a plain file move to promote the task
+* Per-step sub-task files under `.specs/sub-tasks/<task-name>/`, so each implementation agent reads only its own step
+* Steps grouped into independently verifiable phases, each reviewed once, at its own reviewer model
+
+**When to use:** For complex features requiring detailed specifications and planning.
+
+[Full Documentation](sdd/)
+
+#### First Principles Framework
+
+Structured reasoning methodology implementing the ADI (Abduction-Deduction-Induction) cycle for auditable decision-making. The FPF plugin implements structured reasoning using [the First Principles Framework](https://github.com/ailev/FPF) methodology developed by Anatoly Levenchuk a methodology for rigorous, auditable reasoning. The killer feature is turning the black box of AI reasoning into a transparent, evidence-backed audit trail. 
+
+**Key Features:**
+
+* Hypothesis generation with competing alternatives
+* Logical verification and constraint checking
+* Empirical validation with evidence tracking
+* Trust calculus with Weakest Link principle
+* Design Rationale Records (DRRs)
+* Evidence freshness management
+
+The core cycle follows three modes of inference:
+
+- Abduction — Generate competing hypotheses (don't anchor on the first idea).
+- Deduction — Verify logic and constraints (does the idea make sense?).
+- Induction — Gather evidence through tests or research (does the idea work in reality?).
+
+**When to use:** For architectural decisions with long-term consequences requiring auditable reasoning trails.
+
+[Full Documentation](fpf/)
+
+### Code Quality & Architecture
+
+#### Domain-Driven Development
+
+Code quality and architecture patterns including Clean Architecture and SOLID principles.
+
+**Key Features:**
+
+* 14 composable rules organized into Architecture, Function Design, Explicitness, and Code Quality categories
+* Covers Clean Architecture, Command-Query Separation, Functional Core/Imperative Shell, and more
+
+**When to use:** Setting up new projects or enforcing code quality standards.
+
+[Full Documentation](ddd/)
+
+### Process & Analysis
+
+#### Git
+
+Streamlined Git operations with conventional commits, pull request management, and advanced workflow patterns.
+
+**Key Features:**
+
+* Conventional commits with emoji
+* Pull request creation
+* Issue analysis and loading
+* PR review comments loaded and grouped as tasks, for parallel agents to fix.
+* Verify and resolve fixed PR review comments.
+* Git worktrees for parallel branch development
+* Git notes for commit metadata annotations
+
+**When to use:** For all Git operations to maintain commit and PR quality, or when working on multiple branches simultaneously.
+
+[Full Documentation](git/)
+
+#### Kaizen
+
+Continuous improvement methodology with multiple root cause analysis techniques.
+
+**Key Features:**
+
+* Auto-selected analysis methods
+* Five Whys analysis
+* A3 problem solving
+* PDCA cycle
+
+**When to use:** Investigating issues, bugs, or process improvements.
+
+[Full Documentation](kaizen/)
+
+### Customization & Setup
+
+#### Customaize Agent
+
+Tools for creating and refining Claude Code commands, skills, and hooks.
+
+**Key Features:**
+
+* Command creation assistant
+* Skill development guide
+* Prompt testing framework
+* Anthropic best practices
+* Context engineering fundamentals (attention budget, progressive disclosure)
+* Agent evaluation frameworks (LLM-as-Judge, rubrics, bias mitigation)
+
+**When to use:** Creating custom plugins, extending Claude Code, or optimizing agent performance.
+
+[Full Documentation](customaize-agent/)
+
+#### Docs
+
+Project analysis and documentation management commands.
+
+**Key Features:**
+
+* Documentation updates
+* Implementation tracking
+
+**When to use:** After completing development phases to update documentation.
+
+[Full Documentation](docs/)
+
+#### Tech Stack
+
+Language and framework-specific best practices setup.
+
+**Key Features:**
+
+* TypeScript best practices
+* Framework-specific guidelines
+
+**When to use:** Setting up new projects or enforcing language-specific standards.
+
+[Full Documentation](tech-stack/)
+
+#### MCP
+
+Model Context Protocol server integration and setup.
+
+**Key Features:**
+
+* Context7 MCP setup
+* Serena MCP setup
+* MCP server development guide
+
+**When to use:** Integrating external services with Claude Code.
+
+[Full Documentation](mcp/)

@@ -1,0 +1,124 @@
+---
+title: Agent mode
+description: Fully autonomous browser interaction. The AI browses, captures, and writes the client end-to-end.
+---
+
+Agent mode hands the steering wheel to the AI. Describe the goal in plain
+English; providers such as Playwright MCP or Chrome DevTools MCP route browser actions over MCP, whereas **`agent-browser`** shells upstream's CLI directly after Reverse API Engineer resolves the binary (PATH **`agent-browser`**, else **`npm install -g <pin>`**, else **`npx -y`**) and prompt-injected skill workflows.
+
+<Demo
+  src="https://raw.githubusercontent.com/kalil0321/reverse-api-engineer/main/assets/rae-agent-steam.gif"
+  alt="Agent mode turning Steam's charts page into an API client"
+  caption="Agent mode: autonomous capture and codegen in one flow."
+/>
+
+## When to use it
+
+- You want full automation, no manual browsing required.
+- The site exposes a stable, predictable flow (public job boards, docs
+  sites, marketing APIs).
+- You're scripting captures from another agent, a cron job, or CI.
+
+## Running interactively
+
+```bash
+reverse-api-engineer
+# the session starts in agent mode
+> all open jobs on jobs.ashbyhq.com/openai
+```
+
+Or start from the subcommand: in a terminal, `agent` opens the same session
+and starts the run right away, with its options kept for the prompts you type
+next.
+
+```bash
+reverse-api-engineer agent --prompt "all open jobs on jobs.ashbyhq.com/openai" --headless
+```
+
+The agent's steps, messages and reasoning stream into the conversation. Type a
+follow-up when it finishes, answer its questions in the input bar, and press
+`Esc` to stop it. `/resume` picks a past run back up where it stopped, for
+runs that saved their SDK session.
+
+## Running non-interactively
+
+With `--json`, `--json-stream` or `--no-interactive`, `agent` never opens the
+session: it prints plain output and exits, which is what scripts and other
+agents want.
+
+```bash
+reverse-api-engineer agent \
+  --prompt "capture the public jobs api" \
+  --url https://example.com/jobs \
+  --json | jq
+```
+
+The `--json` flag makes the command emit a single JSON document on stdout
+(see [Scripted usage](/docs/cli/scripted-usage) for the schema and exit
+codes).
+
+Use `--json-stream` when a supervising agent wants NDJSON progress events
+during the browser and generation loop:
+
+```bash
+reverse-api-engineer agent \
+  --prompt "capture the public jobs api" \
+  --url https://example.com/jobs \
+  --json-stream
+```
+
+For wrapper or CI validation without launching a browser, use:
+
+```bash
+reverse-api-engineer agent \
+  --prompt "capture the public jobs api" \
+  --url https://example.com/jobs \
+  --dry-run
+```
+
+`--dry-run` implies JSON output and checks prompt, URL, SDK config, browser
+tooling, and output directory writability.
+
+## Agent providers
+
+Pick the provider in `/settings` then "agent provider".
+
+<Tabs items={['chrome-mcp (default)', 'auto', 'agent-browser']}>
+  <Tab value="chrome-mcp (default)">
+    Drives your **real Chrome** browser via
+    [Chrome DevTools MCP](https://www.npmjs.com/package/chrome-devtools-mcp),
+    with your existing sessions, cookies, and auth. Default for new
+    configurations. No HAR file is saved, so `engineer <run_id>` cannot
+    regenerate these runs. `--headless` starts a separate headless Chrome
+    instead, without your sessions.
+
+    **Requirements:**
+    - Node.js 20.19+ (headed and headless)
+    - Headed runs only: Chrome 146+, open, with auto-connect enabled at `chrome://inspect/#remote-debugging`; accept Chrome's connection prompt when the run starts
+
+    If Chrome is not reachable, the run stops before launching with setup
+    steps and `error_kind: config_invalid`; `agent --dry-run` reports the same
+    check.
+  </Tab>
+  <Tab value="auto">
+    **Playwright MCP** browser automation with your configured SDK. Combines
+    browser control and real-time reverse-engineering in a single workflow and
+    records a HAR. Needs no Chrome setup. Use `--headless` when running on
+    machines without a display.
+  </Tab>
+  <Tab value="agent-browser">
+    **`agent-browser`** is the standalone [Vercel CLI](https://github.com/vercel-labs/agent-browser). Reverse API Engineer publishes a banner when it **`npm install -g`'s** the pin, verifies **`--help`**, prefers the PATH shim across runs, falls back to **`npx`** only when npm fails, injects **`skills get core --full`**, **`network har …`**, `@eN` snapshots, and **`skills list` / `skills get`** when clouds come up (see **`agent_browser_notes`**). Pins live in **`agent_browser_npx_package`** / **`RAE_AGENT_BROWSER_PACKAGE`**. Shell access is Bash-first on Claude SDK runs.
+  </Tab>
+</Tabs>
+
+## Reasoning model
+
+The agent's reasoning model is the same as your configured SDK model. See
+[Model selection](/docs/configuration/models) to change it.
+
+<Callout type="info" title="Prompting tips">
+- **Be specific.** *"Capture the search endpoint"* beats *"scrape the site"*.
+- **Provide a `--url`.** Saves the agent a navigation hop and reduces drift.
+- **Use `--json`** when calling from another agent: one JSON document on
+  stdout, logs on stderr, stable exit codes.
+</Callout>

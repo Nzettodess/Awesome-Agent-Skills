@@ -1,0 +1,231 @@
+/**
+ * SQLite Adapter
+ *
+ * Thin wrapper over Node's built-in `node:sqlite` (`DatabaseSync`), exposed
+ * through a small better-sqlite3-shaped interface so the rest of the codebase
+ * is storage-agnostic.
+ *
+ * CodeGraph ships with a bundled Node runtime, so `node:sqlite` (real SQLite,
+ * with WAL + FTS5) is always available — there is no native build step and no
+ * wasm fallback. When run from source instead, it requires Node >= 22.5.
+ */
+
+import { loadNodeSqlite } from './node-sqlite';
+import { toDatabaseOpenError } from './open-error';
+import { toWslSharedIndexError } from './wsl-shared-index';
+
+export interface SqliteStatement {
+  run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
+  get(...params: any[]): any;
+  all(...params: any[]): any[];
+  /**
+   * Lazily yield result rows one at a time instead of materializing the whole
+   * set with `all()`. Use for unbounded scans (e.g. every function/method node)
+   * so memory stays O(1) in the row count rather than O(rows) — see #610, where
+   * `all()`-ing every symbol on a dense project spiked the heap into an OOM.
+   */
+  iterate(...params: any[]): IterableIterator<any>;
+  /**
+   * From now on, hand each row over as an array of its values rather than an
+   * object keyed by column, which is about a third cheaper to read. Returns the
+   * column names, in array order, or undefined on a runtime that can't, whose
+   * rows stay objects (Node before 22.16).
+   */
+  rowsAsArrays(): string[] | undefined;
+}
+
+export interface TransactionOptions {
+  /**
+   * Begin with `BEGIN IMMEDIATE`, taking the write lock up front, instead of a
+   * deferred `BEGIN`. A connection that finds the lock taken then waits it out
+   * (busy_timeout); a deferred transaction that has already read gets
+   * SQLITE_BUSY at once when it comes to write, since SQLite will not wait for
+   * a lock there. No effect when nested in an open transaction.
+   */
+  immediate?: boolean;
+}
+
+export interface SqliteDatabase {
+  prepare(sql: string): SqliteStatement;
+  exec(sql: string): void;
+  pragma(str: string, options?: { simple?: boolean }): any;
+  transaction<T>(fn: (...args: any[]) => T, options?: TransactionOptions): (...args: any[]) => T;
+  close(): void;
+  readonly open: boolean;
+  /** Undefined on a runtime without `isTransaction`; callers must then not memoize. */
+  readonly inTransaction?: boolean;
+}
+
+/**
+ * The active SQLite backend. Only one now (`node:sqlite`); kept as a named type
+ * so `codegraph status` and the per-instance reporting have a stable shape.
+ */
+export type SqliteBackend = 'node-sqlite';
+
+/**
+ * Wraps Node's built-in `node:sqlite` (`DatabaseSync`) to match the
+ * better-sqlite3 interface the rest of the code expects.
+ *
+ * node:sqlite is real SQLite compiled into Node, so it supports WAL, FTS5,
+ * mmap, and `@named` params natively — the only shims needed are the
+ * better-sqlite3 conveniences node:sqlite omits: a `.pragma()` helper, a
+ * `.transaction()` helper, and `open` (node:sqlite exposes `isOpen`).
+ */
+class NodeSqliteAdapter implements SqliteDatabase {
+  private _db: any;
+  private _txDepth = 0;
+  private readonly _dbPath: string;
+
+  constructor(dbPath: string, opts?: { readOnly?: boolean }) {
+    const { DatabaseSync } = loadNodeSqlite();
+    this._dbPath = dbPath;
+    this._db = opts?.readOnly ? new DatabaseSync(dbPath, { readOnly: true }) : new DatabaseSync(dbPath);
+  }
+
+  /**
+   * What a failed call throws: the error itself, or — for a "disk I/O error"
+   * on a WSL index that Windows CodeGraph shares — the actionable rewrite
+   * (#995). Every open runs its PRAGMAs and first reads through the methods
+   * below, and so does every later query. `iterate()` is left raw: a
+   * row-by-row wrapper would tax the unbounded scans it exists for, and a
+   * session reads through `get`/`all` long before it reaches one.
+   */
+  private failure(err: unknown): unknown {
+    return toWslSharedIndexError(err, this._dbPath) ?? err;
+  }
+
+  get inTransaction(): boolean | undefined {
+    return this._db.isTransaction;
+  }
+
+  get open(): boolean {
+    return this._db.isOpen;
+  }
+
+  prepare(sql: string): SqliteStatement {
+    // node:sqlite matches better-sqlite3's calling convention (variadic
+    // positional args, or a single object for @named params), so params forward
+    // through unchanged.
+    let stmt: any;
+    try {
+      stmt = this._db.prepare(sql);
+    } catch (err) {
+      throw this.failure(err);
+    }
+    const failure = (err: unknown): unknown => this.failure(err);
+    return {
+      run(...params: any[]) {
+        let r: any;
+        try {
+          r = stmt.run(...params);
+        } catch (err) {
+          throw failure(err);
+        }
+        return {
+          changes: Number(r?.changes ?? 0),
+          lastInsertRowid: r?.lastInsertRowid ?? 0,
+        };
+      },
+      get(...params: any[]) {
+        try {
+          return stmt.get(...params);
+        } catch (err) {
+          throw failure(err);
+        }
+      },
+      all(...params: any[]) {
+        try {
+          return stmt.all(...params);
+        } catch (err) {
+          throw failure(err);
+        }
+      },
+      iterate(...params: any[]) {
+        return stmt.iterate(...params);
+      },
+      rowsAsArrays() {
+        if (typeof stmt.setReturnArrays !== 'function' || typeof stmt.columns !== 'function') return undefined;
+        stmt.setReturnArrays(true);
+        return stmt.columns().map((column: { name: string }) => column.name);
+      },
+    };
+  }
+
+  exec(sql: string): void {
+    try {
+      this._db.exec(sql);
+    } catch (err) {
+      throw this.failure(err);
+    }
+  }
+
+  pragma(str: string, options?: { simple?: boolean }): any {
+    const trimmed = str.trim();
+    // Write pragma ("key = value"): node:sqlite is real SQLite, so every pragma
+    // (WAL, mmap, synchronous, …) applies as-is.
+    if (trimmed.includes('=')) {
+      this.exec(`PRAGMA ${trimmed}`);
+      return;
+    }
+    // Read pragma. Default: the row object (e.g. { journal_mode: 'wal' }).
+    // `{ simple: true }` returns just the single column value, like better-sqlite3.
+    const row = this.prepare(`PRAGMA ${trimmed}`).get();
+    if (options?.simple) {
+      return row && typeof row === 'object' ? Object.values(row)[0] : row;
+    }
+    return row;
+  }
+
+  transaction<T>(fn: (...args: any[]) => T, options?: TransactionOptions): (...args: any[]) => T {
+    return (...args: any[]) => {
+      // Nested call (a transaction()-wrapped helper invoked from inside another
+      // transaction): run the body directly inside the enclosing transaction.
+      // BEGIN would throw "cannot start a transaction within a transaction",
+      // so no existing caller ever relied on nested rollback granularity —
+      // flattening is behavior-preserving and free.
+      if (this._txDepth > 0) {
+        this._txDepth++;
+        try {
+          return fn(...args);
+        } finally {
+          this._txDepth--;
+        }
+      }
+      this._db.exec(options?.immediate ? 'BEGIN IMMEDIATE' : 'BEGIN');
+      this._txDepth = 1;
+      try {
+        const result = fn(...args);
+        this._db.exec('COMMIT');
+        this._txDepth = 0;
+        return result;
+      } catch (error) {
+        this._db.exec('ROLLBACK');
+        this._txDepth = 0;
+        throw error;
+      }
+    };
+  }
+
+  close(): void {
+    // node:sqlite's DatabaseSync.close() throws if already closed; make it
+    // idempotent to match better-sqlite3 (callers may close more than once).
+    if (this._db.isOpen) this._db.close();
+  }
+}
+
+/**
+ * Create a database connection backed by `node:sqlite`.
+ *
+ * Returns the active backend alongside the db so each `DatabaseConnection` can
+ * report it per-instance — MCP can open multiple project DBs in one process, so
+ * a process-global would race.
+ */
+export function createDatabase(dbPath: string, opts?: { readOnly?: boolean }): { db: SqliteDatabase; backend: SqliteBackend } {
+  try {
+    return { db: new NodeSqliteAdapter(dbPath, opts), backend: 'node-sqlite' };
+  } catch (error) {
+    // A runtime without node:sqlite says so (NodeSqliteUnavailableError);
+    // anything SQLite itself reported names its code and the path.
+    throw toDatabaseOpenError(error, dbPath);
+  }
+}

@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python checks
+__pycache__/
+*.py[cod]

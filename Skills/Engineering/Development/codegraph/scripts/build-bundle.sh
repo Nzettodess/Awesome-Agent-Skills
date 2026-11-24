@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+#
+# Build a self-contained CodeGraph bundle: an official Node runtime + the
+# compiled app + its production deps, so CodeGraph runs with NO system Node and
+# NO native build — node:sqlite is built into the bundled Node. One archive per
+# platform.
+#
+# Because dropping better-sqlite3 left zero native addons, the recipe is pure
+# file-packaging (download the target's Node, copy the app, archive) — so any
+# platform's bundle can be built on any OS. No cross-compile, no native runners.
+#
+# Usage:
+#   scripts/build-bundle.sh <target> [node-version]
+#     target:        darwin-arm64 | darwin-x64 | linux-x64 | linux-arm64
+#                  | win32-x64 | win32-arm64
+#     node-version:  e.g. v24.22.1 (default below; pin for reproducible builds)
+#
+# Output:
+#   unix:    release/codegraph-<target>.tar.gz   (launcher: bin/codegraph)
+#   windows: release/codegraph-<target>.zip      (launchers: bin/codegraph + .cmd)
+set -euo pipefail
+
+TARGET="${1:?usage: build-bundle.sh <target> [node-version]}"
+# The release workflow passes no version, so this default is the Node every
+# release bundles. Keep it on 24.x (the CLI refuses Node 25+) and at 24.22.1 or
+# later. 24.22.1 is Node's October 2026 security release (issue #2780). Before
+# 24.20.0, Node 24 can abort on Windows just as the process exits, after its
+# work is done, with 0xC0000409 and "Assertion failed: !(handle->flags &
+# UV_HANDLE_CLOSING), file src\win\async.c" (nodejs/node#56645, fixed by
+# nodejs/node#61999; issue #2617).
+NODE_VERSION="${2:-v24.22.1}"
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT="$ROOT/release"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+ARCH="${TARGET##*-}"   # x64 | arm64
+OSFAM="${TARGET%-*}"   # darwin | linux | win32
+
+echo "[bundle] target=${TARGET} node=${NODE_VERSION}"
+
+# 1. Download + extract the official Node runtime for the target platform. The
+#    archive must match the SHA-256 that nodejs.org publishes for the release
+#    before anything is unpacked, so a bundle ships exactly that release's
+#    official build, never a truncated or substituted download (issue #2780).
+if [ "$OSFAM" = "win32" ]; then
+  NODE_DIST="node-${NODE_VERSION}-win-${ARCH}"
+  NODE_ARCHIVE="${NODE_DIST}.zip"
+else
+  NODE_DIST="node-${NODE_VERSION}-${TARGET}"
+  NODE_ARCHIVE="${NODE_DIST}.tar.gz"
+fi
+NODE_URL="https://nodejs.org/dist/${NODE_VERSION}/${NODE_ARCHIVE}"
+echo "[bundle] downloading ${NODE_URL}"
+curl -fsSL "$NODE_URL" -o "$WORK/$NODE_ARCHIVE"
+curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt" -o "$WORK/SHASUMS256.txt"
+EXPECTED_SHA="$(awk -v name="$NODE_ARCHIVE" '$2 == name { print $1 }' "$WORK/SHASUMS256.txt")"
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_SHA="$(sha256sum < "$WORK/$NODE_ARCHIVE" | cut -d' ' -f1)"
+else
+  ACTUAL_SHA="$(shasum -a 256 < "$WORK/$NODE_ARCHIVE" | cut -d' ' -f1)"   # macOS
+fi
+if [ -z "$EXPECTED_SHA" ] || [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+  echo "[bundle] error: ${NODE_ARCHIVE} does not match the SHA-256 that nodejs.org lists for ${NODE_VERSION} (listed: ${EXPECTED_SHA:-nothing}, downloaded: ${ACTUAL_SHA})" >&2
+  exit 1
+fi
+echo "[bundle] verified ${NODE_ARCHIVE} against nodejs.org's SHASUMS256.txt (sha256 ${ACTUAL_SHA})"
+if [ "$OSFAM" = "win32" ]; then
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$WORK/$NODE_ARCHIVE" -d "$WORK"
+  else
+    tar -xf "$WORK/$NODE_ARCHIVE" -C "$WORK"   # bsdtar can read zip
+  fi
+  NODE_BIN="$WORK/${NODE_DIST}/node.exe"
+else
+  tar -xzf "$WORK/$NODE_ARCHIVE" -C "$WORK"
+  NODE_BIN="$WORK/${NODE_DIST}/bin/node"
+fi
+[ -f "$NODE_BIN" ] || { echo "[bundle] error: node binary not found ($NODE_BIN)" >&2; exit 1; }
+
+# 2. Build the app (compiled JS + copied wasm/schema assets).
+echo "[bundle] building app"
+( cd "$ROOT" && npm run build >/dev/null )
+
+# 3. Stage: app + production-only deps (pure JS/wasm → portable across platforms).
+STAGE="$WORK/codegraph-${TARGET}"
+mkdir -p "$STAGE/lib" "$STAGE/bin"
+cp -R "$ROOT/dist" "$STAGE/lib/dist"
+# The browser viewer rides along inside dist/viewer (built by `npm run build`
+# above). Fail here rather than shipping a bundle whose `codegraph ui` serves
+# a 404 — the copy is verified, not assumed.
+node "$ROOT/scripts/check-ui-build.mjs" --root "$STAGE/lib"
+cp "$ROOT/package.json" "$ROOT/package-lock.json" "$STAGE/lib/"
+echo "[bundle] installing production dependencies"
+# The staged package.json declares the `ui` workspace but the bundle carries
+# no ui/ source — only its build output. That is fine: ui/ has dev
+# dependencies only, so --omit=dev skips the workspace outright and no link
+# is created. (If a future npm starts erroring on the absent folder, stage a
+# stub ui/package.json before this line rather than editing the lock.)
+( cd "$STAGE/lib" && npm ci --omit=dev --ignore-scripts >/dev/null 2>&1 )
+rm -f "$STAGE/lib/package-lock.json"
+
+# 3b. Native extraction kernel (optional). Included when a prebuilt .node for
+#     the target exists — release/kernel/<target>/codegraph-kernel.node (the
+#     release workflow's prebuild artifacts) or the locally staged
+#     codegraph-kernel/prebuilds/<target>/ (scripts/build-kernel.sh). Absent →
+#     the bundle simply runs the wasm extraction path; the kernel is a
+#     per-language speedup, never a requirement (see
+#     docs/design/rust-kernel-migration-plan.md).
+KERNEL_NODE=""
+for candidate in "$ROOT/release/kernel/${TARGET}/codegraph-kernel.node" \
+                 "$ROOT/codegraph-kernel/prebuilds/${TARGET}/codegraph-kernel.node"; do
+  if [ -f "$candidate" ]; then KERNEL_NODE="$candidate"; break; fi
+done
+if [ -n "$KERNEL_NODE" ]; then
+  mkdir -p "$STAGE/lib/kernel"
+  cp "$KERNEL_NODE" "$STAGE/lib/kernel/codegraph-kernel.node"
+  echo "[bundle] native kernel included ($KERNEL_NODE)"
+else
+  echo "[bundle] no native kernel for ${TARGET} — bundle uses the wasm extraction path"
+fi
+
+# 4. Vendored Node + launcher (the launcher uses the bundled Node by relative
+#    path, so no system Node is ever needed).
+#
+# `--liftoff-only`: keep tree-sitter's large WASM grammars on V8's Liftoff
+# baseline compiler so they never reach the turboshaft optimizing tier, whose
+# per-compilation Zone arena OOMs the whole process (`Fatal process out of
+# memory: Zone`) on Node >= 22 — even with tens of GB free. The flag is read at
+# V8 engine init so it must be on node's command line; the parse worker inherits
+# it. See issues #293/#298 and src/extraction/wasm-runtime-flags.ts. (The CLI
+# also self-relaunches with this flag when launched without it, so non-bundled
+# runs are covered too; passing it here avoids that extra spawn.)
+#
+# `--max-semi-space-size=16`: V8's space for new objects at Node 22's size, in
+# every thread; see NODE_RUNTIME_FLAGS in the same file.
+if [ "$OSFAM" = "win32" ]; then
+  cp "$NODE_BIN" "$STAGE/node.exe"
+  printf '@"%%~dp0..\\node.exe" --liftoff-only --disable-warning=ExperimentalWarning --max-semi-space-size=16 "%%~dp0..\\lib\\dist\\bin\\codegraph.js" %%*\r\n' \
+    > "$STAGE/bin/codegraph.cmd"
+  # Git Bash (including Claude Code hooks) does not resolve .cmd via PATHEXT.
+  cat > "$STAGE/bin/codegraph" <<'LAUNCH'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# node.exe is a native program, so hand it a Windows path. Git Bash rewrites a
+# /c/... argument only while path conversion is on, and a terminal with
+# MSYS_NO_PATHCONV=1 or MSYS2_ARG_CONV_EXCL=* turns it off (#3464).
+JS="$DIR/lib/dist/bin/codegraph.js"
+if command -v cygpath >/dev/null 2>&1; then JS="$(cygpath -w "$JS")"; fi
+# Preserve an inherited CODEGRAPH_HOST_PPID; do not replace it with MSYS's
+# $PPID, which is not a native Windows PID usable by the orphan watchdog.
+exec "$DIR/node.exe" --liftoff-only --disable-warning=ExperimentalWarning --max-semi-space-size=16 "$JS" "$@"
+LAUNCH
+  chmod +x "$STAGE/bin/codegraph"
+else
+  cp "$NODE_BIN" "$STAGE/node"
+  cat > "$STAGE/bin/codegraph" <<'LAUNCH'
+#!/bin/sh
+# Resolve symlinks (e.g. the ~/.local/bin/codegraph link install.sh creates) so
+# we find the real bundle dir, not the symlink's location.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  target="$(readlink "$SELF")"
+  case "$target" in
+    /*) SELF="$target" ;;
+    *) SELF="$(dirname "$SELF")/$target" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+# Thread the MCP host's pid to the server's orphan watchdog (issue #1185).
+# $PPID is our parent — the host itself when it launched this script directly;
+# an already-threaded value (the npm shim sets the true host pid) wins.
+CODEGRAPH_HOST_PPID="${CODEGRAPH_HOST_PPID:-$PPID}"
+export CODEGRAPH_HOST_PPID
+# --liftoff-only: avoid the V8 turboshaft WASM Zone OOM (issues #293/#298).
+# --disable-warning=ExperimentalWarning: mute node:sqlite's per-thread
+# "experimental feature" warning that otherwise interleaves with the progress UI.
+# --max-semi-space-size=16: V8's space for new objects at Node 22's size.
+exec "$DIR/node" --liftoff-only --disable-warning=ExperimentalWarning --max-semi-space-size=16 "$DIR/lib/dist/bin/codegraph.js" "$@"
+LAUNCH
+  chmod +x "$STAGE/bin/codegraph"
+fi
+
+# 5. Archive (.zip for Windows, .tar.gz otherwise).
+mkdir -p "$OUT"
+if [ "$OSFAM" = "win32" ]; then
+  ARCHIVE="$OUT/codegraph-${TARGET}.zip"
+  rm -f "$ARCHIVE"
+  ( cd "$WORK" && zip -rqX "$ARCHIVE" "codegraph-${TARGET}" )
+else
+  ARCHIVE="$OUT/codegraph-${TARGET}.tar.gz"
+  # --no-xattrs: don't embed macOS xattrs that make GNU tar warn on Linux.
+  tar --no-xattrs -czf "$ARCHIVE" -C "$WORK" "codegraph-${TARGET}"
+fi
+echo "[bundle] wrote ${ARCHIVE} ($(du -h "$ARCHIVE" | cut -f1))"

@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - hopper
+    - ghidra-12-1-2

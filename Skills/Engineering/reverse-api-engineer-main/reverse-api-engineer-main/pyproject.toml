@@ -1,0 +1,195 @@
+[project]
+name = "reverse-api-engineer"
+version = "0.16.0"
+description = "The agent that turns websites into APIs."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Kalil", email = "kalil0321@users.noreply.github.com" }
+]
+license = { text = "MIT" }
+keywords = [
+    "api",
+    "api-client",
+    "reverse-engineering",
+    "web-scraping",
+    "scraping",
+    "ai",
+    "llm",
+    "agent",
+    "claude",
+    "claude-code",
+    "mcp",
+    "har",
+    "playwright",
+    "browser-automation",
+    "code-generation",
+    "codegen",
+    "python",
+    "typescript",
+    "openapi",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "click>=8.3.3",
+    "claude-agent-sdk>=0.2.174",
+    "rich>=13.0.0",
+    "markdown-it-py>=2.2.0",
+    "prompt-toolkit>=3.0.40",
+    "questionary>=2.0.0",
+    "watchdog>=3.0.0",
+    "setproctitle>=1.3.0",
+    "requests>=2.33.0",
+    "aiohttp>=3.14.4",
+    "pygments>=2.20.0",
+    "cryptography>=50.0.0",
+    "httpx2>=2.12.0",
+    # Security floors must reach pip/uv consumers, which do not use uv.lock.
+    "anyio>=4.14.2",
+    "certifi>=2026.10.19",
+    "multidict>=6.9.1",
+    "opentelemetry-api>=1.45.1",
+    "PyJWT>=2.15.0",
+    "python-multipart>=0.0.31",
+    "starlette>=1.3.1",
+    "urllib3>=2.8.0",
+]
+
+[project.optional-dependencies]
+# Manual capture mode drives a local Playwright browser. Agent mode (the
+# default) uses external MCP servers over npx and needs none of this, so the
+# heavy browser stack is opt-in — keeping the base install lightweight.
+manual = [
+    "playwright>=1.64.1",
+    "playwright-stealth>=1.0.0",
+]
+copilot = [
+    "github-copilot-sdk>=1.0.26,<2",
+]
+# Brings its own Codex runtime (about 170 MB); 0.167.1 keeps rae's auth.json link when it refreshes tokens.
+codex = [
+    "openai-codex>=0.167.1,<1",
+]
+
+[project.urls]
+Homepage = "https://reverseapi.dev"
+Documentation = "https://reverseapi.dev/docs"
+Repository = "https://github.com/kalil0321/reverse-api-engineer"
+Issues = "https://github.com/kalil0321/reverse-api-engineer/issues"
+Changelog = "https://github.com/kalil0321/reverse-api-engineer/blob/main/CHANGELOG.md"
+
+[project.scripts]
+reverse-api-engineer = "reverse_api.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reverse_api"]
+exclude = [
+    "src/reverse_api/cursor_bridge/node_modules/**",
+]
+
+[tool.hatch.build.targets.sdist]
+# The sdist ships what is needed to build and verify the package: src/, tests/,
+# and the project metadata. Everything below is repo furniture that only bloats
+# the download — README images are served from raw.githubusercontent.com, so the
+# binary assets are dead weight inside the tarball.
+exclude = [
+    "rae_autoscout.mp4",
+    "assets/**",
+    "examples/**",
+    "design/**",
+    "uv.lock",
+    # Local tooling (e2e harness, settings, worktrees, plans), never part of a release.
+    ".claude/**",
+    "src/reverse_api/cursor_bridge/node_modules/**",
+    "website/**",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "ruff>=0.14.10",
+    "pytest>=9.0.3",
+    "pytest-cov>=6.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src/reverse_api"]
+omit = [
+    "src/reverse_api/cli.py",
+    "src/reverse_api/browser.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+line-length = 150
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "C",   # flake8-comprehensions
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = []
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+ignore_missing_imports = true

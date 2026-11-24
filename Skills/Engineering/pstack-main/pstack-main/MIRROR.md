@@ -1,0 +1,59 @@
+# Syncing this mirror
+
+This repo mirrors [`cursor/plugins/pstack`](https://github.com/cursor/plugins/tree/main/pstack) and adds its own edits: the top of `README.md` and harness-neutral rewrites in some skills.
+
+Two branches keep those edits safe:
+
+- `upstream` holds Cursor's files exactly, with no local edits.
+- `main` is `upstream` plus this mirror's edits.
+
+Never copy Cursor's files onto `main` directly. That erases the edits.
+
+## Steps
+
+1. Copy Cursor's latest `pstack/` folder onto the `upstream` branch:
+
+   ```bash
+   git clone --depth 1 --filter=blob:none --sparse https://github.com/cursor/plugins.git /tmp/cursor-plugins
+   git -C /tmp/cursor-plugins sparse-checkout set pstack
+   git switch upstream
+   rsync -a --delete --exclude .git --exclude MIRROR.md /tmp/cursor-plugins/pstack/ ./
+   git add -A
+   git commit -m "upstream: cursor/plugins/pstack @ $(git -C /tmp/cursor-plugins rev-parse --short HEAD)"
+   ```
+
+2. Merge it into `main`. Git applies only what changed upstream and keeps the mirror's edits:
+
+   ```bash
+   git switch main
+   git merge upstream
+   ```
+
+   A conflict means Cursor changed a line this mirror also changed. Keep Cursor's new meaning and reapply the harness-neutral wording.
+
+   Also keep the community fixes listed under "What this mirror changes" in `README.md`, unless Cursor has shipped the same fix. Then take Cursor's version and drop the fix from that list.
+
+   Carry only bug fixes. A PR that changes what a skill tells the agent, like a new style rule, belongs upstream at cursor/plugins. Decline it here.
+
+3. Refresh the bundled Comment Sicko prompt, then check that no new Cursor-only instructions arrived:
+
+   ```bash
+   cp agents/comment-sicko.md skills/no-comments/references/comment-sicko.md
+   git diff upstream@{1} upstream -- skills | grep -nE '\.cursor/|agent-transcripts|cursor-team-kit|create-skill|Task'
+   ```
+
+   Rewrite any new hits the same way as the existing edits. The Harness section in `skills/poteto-mode/SKILL.md` lists the mappings.
+
+   Then give Codex the explicit-only mark. Codex ignores `disable-model-invocation: true` and reads `agents/openai.yaml` instead, so this script writes that file for each marked skill and removes the ones it wrote for skills that lost the mark:
+
+   ```bash
+   python3 mirror-assets/codex-policy.py
+   ```
+
+4. Add a row to the top of `SYNC-LOG.md` with the date, the upstream version, and the result. Add one also when nothing changed upstream.
+
+5. Push both branches:
+
+   ```bash
+   git push origin main upstream
+   ```

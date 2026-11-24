@@ -1,0 +1,1470 @@
+"""The interactive CLI: a full-screen session with the conversation above an input bar fixed to the bottom.
+
+Every run streams into the conversation through the bridge: agent, engineer and manual capture,
+on every SDK. A run works in a worker thread; the app's own thread draws.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import io
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+import warnings
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from typing import IO, Any, cast
+from urllib.parse import urlparse
+from urllib.request import url2pathname
+
+import click
+from prompt_toolkit.application import Application, run_in_terminal
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text import FormattedText, StyleAndTextTuples
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent, merge_key_bindings
+from prompt_toolkit.key_binding.defaults import load_key_bindings
+from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout.processors import AfterInput, ConditionalProcessor
+from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.output import create_output
+from prompt_toolkit.styles import Style
+from rich.console import Console, RenderableType
+from rich.text import Text
+
+from ..messages import MessageStore
+from ..session import run_sdk
+from ..utils import recorded_cost, usage_tokens
+from . import clipboard, settings
+from .bridge import Bridge, LedgerUI, activate, first_line, short_name
+from .style import DIM, INK, SKY, THEME, height, width
+from .transcript import (
+    LINE_END,
+    InputBelow,
+    Line,
+    Raw,
+    Selection,
+    TextBelow,
+    Transcript,
+    TranscriptControl,
+    TranscriptWriter,
+    highlight,
+    selected_text,
+    text_of,
+)
+from .view import EFFORTS, LedgerView, Picker, SessionState, model_label, run_summary
+
+MODES = {
+    "agent": "the agent browses the site and writes the client",
+    "manual": "you browse, rae records the traffic",
+    "engineer": "re-engineer a past run",
+}
+EFFORT_NOTES = {
+    "low": "fastest, fewer tool calls",
+    "medium": "lighter reasoning, the default on Opus 5.5 and Haiku 5.5",
+    "high": "deep reasoning, the default for most models",
+    "xhigh": "deeper reasoning on hard captures",
+    "max": "most thorough, slowest and priciest",
+}
+COMMANDS = {
+    "/new": "start a new capture",
+    "/model": "choose the model",
+    "/effort": "how hard the agent thinks",
+    "/mode": "choose the mode",
+    "/engineer": "choose the run engineer mode works on",
+    "/settings": "all settings",
+    "/history": "past runs: their details, resume or re-engineer",
+    "/resume": "a past run's conversation, to continue it",
+    "/output": "everything from this session, unfolded",
+    "/open": "open the latest client",
+    "/clear": "clear the conversation and start over",
+    "/help": "what rae does, its modes, commands and keys",
+    "/exit": "quit rae",
+}
+KEYS = (
+    ("enter", "send · answers the run that waits for a follow-up"),
+    ("esc", "stop the run · close a list"),
+    ("↑ ↓", "earlier prompts · move in a list, around from either end"),
+    ("tab", "complete a command"),
+    ("shift+tab", "next mode"),
+    ("ctrl+e", "next effort"),
+    ("ctrl+o", "everything from this session, unfolded"),
+    ("pageup pagedown", "scroll, as does the mouse wheel · end jumps to the latest"),
+    ("click", "open a file or a URL"),
+    ("drag", "select text, copied when you let go"),
+    ("option+delete", "delete a word, with Option as Meta · or ctrl+w"),
+    ("ctrl+u", "delete to the start of the bar"),
+    ("ctrl+c", "stop the run, again to quit · clear the bar · quit"),
+    ("ctrl+d", "quit"),
+)
+ALIASES = {"/quit": "/exit", "/commands": "/help"}
+HISTORY_RUNS = 20
+ESC_WAIT = 0.05  # seconds a lone Esc waits for a key that would make it Option+something
+# Commands that open a picker are echoed once a choice shows something, not when the picker opens.
+PICKER_COMMANDS = {"/model", "/effort", "/mode", "/engineer", "/history", "/resume", "/settings"}
+URL_IN_PROMPT = re.compile(r"https?://([^/\s]+)|\b((?:[\w-]+\.)+(?:com|io|co|ch|de|fr|uk|org|net|dev|ai|app|so|sh|eu|jobs))\b")
+
+
+def around(index: int, count: int) -> int:
+    """A list's index that goes around: past the last item to the first, before the first to the last."""
+    return index % count if count else 0
+
+
+def file_path(target: str) -> str:
+    """A file:// link as a local path: url2pathname turns /C:/x into C:\\x on Windows, and a host makes a UNC path."""
+    parsed = urlparse(target)
+    path = url2pathname(parsed.path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        sep = "\\" if sys.platform == "win32" else "/"
+        path = f"{sep}{sep}{parsed.netloc}{path}"
+    return path
+
+
+def open_target(target: str) -> None:
+    """Open a clicked link: files with the system's default app, URLs in the browser."""
+    path = file_path(target) if target.startswith("file://") else target
+    if sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
+        return
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603
+
+
+def host_in(prompt: str) -> str:
+    m = URL_IN_PROMPT.search(prompt)
+    return (m.group(1) or m.group(2) or "") if m else ""
+
+
+def run_output_dir(run: dict[str, Any] | None) -> str | None:
+    """The folder a run saved its files under, when it is not the default: its session's, else its HAR folder's base."""
+    run = run or {}
+    saved = (run.get("sdk_session") or {}).get("output_dir")
+    if saved:
+        return str(saved)
+    har_dir = (run.get("paths") or {}).get("har_dir")  # <base>/har/<run_id>
+    return str(Path(har_dir).parent.parent) if har_dir else None
+
+
+def user_words(prompt: Any) -> str:
+    """What the user asked: the mission inside an agent's brief, the instructions or prompt inside an engineer's,
+    else the message itself."""
+    text = str(prompt or "")
+    found = (
+        re.search(r"<mission>(.*?)</mission>", text, re.DOTALL)
+        or re.search(r"\nAdditional instructions:\n(.*?)(?:\n## |\Z)", text, re.DOTALL)
+        or re.search(r"<user_prompt>(.*?)</user_prompt>", text, re.DOTALL)
+    )
+    words = (found.group(1) if found else text).strip()
+    return words if len(words) <= 500 else first_line(words, 200)
+
+
+RUN_PAUSE = 600  # seconds between two messages past which the run was waiting or set aside, not working
+
+
+def run_durations(messages: list[dict[str, Any]]) -> list[float]:
+    """Seconds a run had worked by each of its saved messages, without the long pauses of a resumed run."""
+    total, last, worked = 0.0, None, []
+    for msg in messages:
+        try:
+            stamp: datetime | None = datetime.fromisoformat(str(msg.get("timestamp")))
+        except ValueError:
+            stamp = None
+        if stamp is not None and last is not None and 0 <= (gap := (stamp - last).total_seconds()) <= RUN_PAUSE:
+            total += gap
+        last = stamp or last
+        worked.append(total)
+    return worked
+
+
+def run_duration(messages: list[dict[str, Any]]) -> float:
+    worked = run_durations(messages)
+    return worked[-1] if worked else 0.0
+
+
+class InputLexer(Lexer):
+    """Highlights /commands and URLs while typing."""
+
+    def __init__(self, st: SessionState) -> None:
+        self.st = st
+
+    def lex_document(self, document: Document) -> Callable[[int], StyleAndTextTuples]:
+        def get_line(n: int) -> StyleAndTextTuples:
+            line = document.lines[n]
+            frags: StyleAndTextTuples = []
+            pos = 0
+            for m in re.finditer(r"(^/\w*)|(https?://\S+)|(\b[\w.-]+\.(?:com|ch|io|dev|org|net|ai|co)\S*)", line):
+                frags.append(("", line[pos : m.start()]))
+                frags.append((f"fg:{self.st.accent} bold" if m.group(1) else f"fg:{SKY} underline", m.group(0)))
+                pos = m.end()
+            frags.append(("", line[pos:]))
+            return frags
+
+        return get_line
+
+
+class Session:
+    def __init__(self) -> None:
+        from .. import cli
+
+        self.cli = cli
+        sdk = cli.config_manager.get("sdk", "claude")
+        self.st = SessionState(
+            sdk=sdk,
+            model=cli.default_model_for_configured_sdk(sdk),
+            effort=cli.config_manager.get("claude_effort"),
+            codex_effort=cli.config_manager.get("codex_effort"),
+        )
+        self.transcript = Transcript(on_link=open_target)
+        self.view = LedgerView(self.st, self.transcript)
+        self.buf = Buffer(multiline=False, history=InMemoryHistory())
+        self.bridge = Bridge(self.view, self.invalidate, self.ask_user)
+        self.app: Application | None = None
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.real_out, self.real_err = sys.stdout, sys.stderr
+        self.after_run: Callable[[], None] | None = None  # what starts once the open run has wrapped up
+        self.first: tuple[str, Callable[[], Any]] | None = None  # a run a subcommand handed over
+        # Per mode, how a subcommand's options (--headless, --output-dir...) start each prompt: runner(prompt, model),
+        # and in engineer mode runner(prompt, model, target run).
+        self.runners: dict[str, Callable[..., Any]] = {}
+        self.worker: threading.Thread | None = None
+        self.update_checked = False
+        self.buf.on_text_changed += self._reset_palette
+        # The selection, by (line, column) in the lines last drawn: the header and the conversation.
+        self.selection: Selection | None = None
+        self.view_lines: list[Line] = []
+        self.view_start = self.view_end = 0  # the first of them on screen, and the one past the last
+        self.view_width = 0
+        # Off the app's loop, so a slow clipboard command never holds up the screen, and one copy at a time, so an
+        # older selection cannot land on the clipboard after a newer one.
+        self.copier = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rae-copy")
+        self.copies_asked = 0
+        self.buf.on_text_changed += self._drop_selection
+        # Stray prints read as notices: dim and indented like the rest of the ledger.
+        self.capture = TranscriptWriter(self._captured, plain_style=f"fg:{DIM}", indent="   ")
+
+    # plumbing
+
+    def invalidate(self) -> None:
+        if self.app is not None:
+            self.app.invalidate()
+
+    def _reset_palette(self, _buf: Buffer) -> None:
+        # Typing narrows the menu or a searchable list, so the first match is the one enter picks.
+        self.st.palette_index = 0
+        if self.st.picker is not None and self.st.picker.search:
+            self.st.picker.index = 0
+
+    def _drop_selection(self, _buf: Buffer) -> None:
+        self.selection = None
+
+    def _captured(self, raw: Raw) -> None:
+        self.view.out(raw)
+        self.invalidate()
+
+    def call_soon(self, fn: Callable[[], None]) -> None:
+        if self.loop is not None:
+            try:
+                self.loop.call_soon_threadsafe(fn)
+            except RuntimeError:
+                pass  # between two stretches of full screen the loop is closed; nothing to redraw
+
+    def ask_user(self, spec: dict[str, Any]) -> Future:
+        """Show an agent question in the bar; the future resolves with the answer, or an empty string if skipped."""
+        fut: Future = Future()
+
+        def show() -> None:
+            if fut.done():
+                return  # the run was stopped before the question reached the bar
+            options = spec.get("options") or []
+            if options:
+                items = [(label, label, desc) for label, desc in options] + [("", "something else", "type your own answer")]
+
+                def picked(value: str | None) -> None:
+                    if value == "":
+                        if not fut.done():
+                            self.st.question = fut
+                    elif not fut.done():
+                        fut.set_result(value or "")
+
+                multi = bool(spec.get("multi"))
+                title = str(spec.get("question", "")) + (" · space picks several, enter sends" if multi else "")
+                self.st.picker = Picker(title, items, None, picked, question=True, multi=multi)
+            else:
+                self.st.question = fut
+            self.invalidate()
+
+        self.call_soon(show)
+        return fut
+
+    # commands
+
+    def palette_active(self) -> bool:
+        """The command menu shows while a command is typed, but not over a picker, nor while the agent
+        awaits a typed answer, which can start with / (a path)."""
+        st, text = self.st, self.buf.text
+        return st.picker is None and st.question is None and text.startswith("/") and " " not in text
+
+    def palette_items(self) -> list[tuple[str, str]]:
+        typed = self.buf.text.strip().lower()
+        aliased = {target for alias, target in ALIASES.items() if alias.startswith(typed)}
+        items = [(c, d) for c, d in COMMANDS.items() if c.startswith(typed) or c in aliased]
+        return sorted(items, key=lambda item: item[0] != ALIASES.get(typed, typed))
+
+    def picker_items(self, p: Picker) -> list[tuple[str, str, str]]:
+        """The picker's items, narrowed to what is typed in the bar when it searches."""
+        typed = self.buf.text.strip().lower()
+        if not (p.search and typed):
+            return p.items
+        return [item for item in p.items if typed in f"{item[0]} {item[1]} {item[2]}".lower()]
+
+    def choose(self) -> None:
+        """Enter on an open picker: its highlighted item, or what was typed for a question or a typed value."""
+        p, self.st.picker = self.st.picker, None
+        if p is None:
+            return
+        if (p.question or p.typed) and self.buf.text.strip():
+            answer = self.buf.text.strip()
+            self.buf.reset()
+            p.on_pick(answer)
+        elif p.multi and p.chosen:
+            p.on_pick(", ".join(value for value, _, _ in p.items if value in p.chosen))
+        else:
+            items = self.picker_items(p)
+            if not items:
+                self.st.picker = p  # nothing matches what was typed: keep the list open
+                return
+            if p.search:
+                self.buf.reset()
+            p.on_pick(items[min(p.index, len(items) - 1)][0])
+
+    def move_in_picker(self, step: int) -> None:
+        p = self.st.picker
+        if p is not None:
+            # A filtered list can be shorter than the index the full one left.
+            count = len(self.picker_items(p))
+            p.index = around(min(p.index, count - 1) + step, count)
+
+    def toggle(self) -> None:
+        """Space on a several-answers question: adds or removes the highlighted option."""
+        p = self.st.picker
+        if p is None or not p.multi:
+            return
+        value = p.items[p.index][0]
+        if value:
+            p.chosen.remove(value) if value in p.chosen else p.chosen.append(value)
+
+    def open_picker(self, title: str, items: list[tuple[str, str, str]], current: str | None, on_pick: Callable[[str | None], None]) -> None:
+        index = next((i for i, (v, _, _) in enumerate(items) if v == current), 0)
+        self.st.picker = Picker(title, items, current, on_pick, index)
+
+    def set_model(self, value: str | None) -> None:
+        st = self.st
+        if not value or value == st.model:
+            return
+        old = model_label(st.model)
+        st.model = value
+        self.cli.config_manager.set("claude_code_model", value)
+        self.view.event("model", old, model_label(value), "from the next run" if st.run_open else "")
+
+    def set_effort(self, value: str | None) -> None:
+        if not value or value == self.st.effort_label:
+            return
+        old = self.st.effort_label
+        self.st.effort = value
+        self.cli.config_manager.set("claude_effort", value)
+        self.view.event("effort", old, value, "from the next run" if self.st.run_open else "")
+
+    def set_mode(self, value: str | None) -> None:
+        if value and value != self.st.mode:
+            old, self.st.mode = self.st.mode, value
+            self.find_target()
+            self.view.event("mode", old, value)
+
+    def find_target(self) -> None:
+        """Unless a run was chosen, engineer mode works on the latest one with a HAR."""
+        st = self.st
+        if st.mode == "engineer" and not st.engineer_chosen:
+            run = self.cli.latest_capture()
+            st.engineer_target = (run["run_id"], str(run.get("prompt") or "")) if run else None
+
+    def placeholder(self) -> str:
+        """The empty bar's hint: in engineer mode, what to type about the run it works on."""
+        if self.st.mode != "engineer":
+            return "describe the API you want, e.g. all open jobs on jobs.ashbyhq.com/openai"
+        if self.st.engineer_target is None:
+            return "no HAR yet · manual mode records one, as does agent with agent_provider auto"
+        return "what should change, e.g. add pagination · /engineer picks another run"
+
+    def choose_target(self, run_id: str | None) -> None:
+        """/engineer: the run engineer mode works on, until another one is engineered or captured."""
+        if not run_id:
+            return
+        st, view = self.st, self.view
+        run = self.cli.session_manager.get_run(run_id)
+        view.command("/engineer", run_id)
+        if run is None:
+            view.notice(f"no run {run_id}")
+        elif not self.cli.has_capture(run):
+            view.notice(f"run {run_id} has no HAR, so engineer cannot work on it · /engineer lists the runs that have one")
+        else:
+            st.engineer_target, st.engineer_chosen = (run_id, str(run.get("prompt") or "")), True
+            self.set_mode("engineer")
+            view.run_details(run)
+            view.notice("type what should change in its client" + (" · from the next run, /new ends this one" if st.run_open else ""))
+        self.invalidate()
+
+    def cycle_effort(self) -> None:
+        if not self.st.has_effort:
+            return
+        level = EFFORTS.index(self.st.effort_label) if self.st.effort_label in EFFORTS else 2
+        value = EFFORTS[(level + 1) % len(EFFORTS)]
+        self.st.effort = value
+        self.cli.config_manager.set("claude_effort", value)
+
+    def run_command(self, text: str) -> None:
+        cmd, _, arg = text.partition(" ")
+        cmd, arg = cmd.lower(), arg.strip()
+        cmd = ALIASES.get(cmd, cmd)
+        st, view = self.st, self.view
+        if cmd not in PICKER_COMMANDS | {"/exit", "/clear"}:
+            view.command(cmd, arg)
+        if cmd == "/exit":
+            self.quit()
+        elif cmd == "/new":
+            self.after_run = None  # a /resume asked for while a run wrapped up no longer applies
+            if st.waiting:
+                self.end_run()
+            elif st.running:
+                view.notice("a run is in progress · esc stops it")
+            else:
+                view.notice("ready · describe the API you want")
+        elif cmd == "/help":
+            view.help(MODES, COMMANDS, KEYS)
+        elif cmd == "/model":
+            if st.sdk != "claude":
+                view.command(cmd)
+                view.notice(f"the {st.sdk} model is set in /settings")
+            else:
+                from ..tui import get_model_choices
+
+                current = st.model
+                self.open_picker("choose a model", settings.choices("claude_code_model", get_model_choices(), current), current, self.set_model)
+        elif cmd == "/effort" and st.sdk == "codex":
+            self.pick_codex_effort()
+        elif cmd == "/effort" and not st.has_effort:
+            view.command(cmd)
+            view.notice(st.no_effort_reason)
+        elif cmd == "/effort":
+            self.open_picker("how hard the agent thinks", [(e, e, EFFORT_NOTES[e]) for e in EFFORTS], st.effort_label, self.set_effort)
+        elif cmd == "/mode":
+            self.open_picker("choose a mode", [(m, m, d) for m, d in MODES.items()], st.mode, self.set_mode)
+        elif cmd == "/engineer":
+            if arg:
+                self.choose_target(arg)
+            else:
+                current = st.engineer_target[0] if st.engineer_target else None
+                self.pick_run(cmd, "engineer which run", self.choose_target, keep=self.cli.has_capture, empty=self.cli.NO_CAPTURE, current=current)
+        elif cmd == "/output":
+            self.show_output()
+        elif cmd == "/open":
+            if st.last_client:
+                open_target(str(st.last_client))
+            else:
+                view.notice("no client yet")
+        elif cmd == "/clear":
+            if st.running:
+                view.notice("a run is in progress · esc stops it")
+            else:
+                if st.waiting:
+                    self.end_run()
+                view.flush_live()
+                self.transcript.clear()
+                self.selection = None
+                st.scroll, st.folded, st.cost, st.tokens, st.step = 0, False, 0.0, 0, 0
+                st.last_client, st.client_name, st.host, st.run_id = None, "", "", None
+                self.bridge.cost_base = 0.0
+        elif cmd == "/settings":
+            self.open_settings()
+        elif cmd == "/history":
+            self.pick_run(cmd, "past runs", self.show_run)
+        elif cmd == "/resume":
+            if arg:
+                self.resume(arg)
+            else:
+                self.pick_run(cmd, "resume a run", self.resume, keep=self.cli.resumable, empty="no run can be resumed yet · runs from now on can")
+        else:
+            view.notice(f"unknown command {cmd} · / lists them")
+        self.invalidate()
+
+    # settings
+
+    def open_settings(self, at: str | None = None) -> None:
+        """Every setting with its value; enter changes the highlighted one and comes back here."""
+        cfg = self.cli.config_manager
+        items = [(key, label, settings.shown(cfg, key)) for key, label, _ in settings.SETTINGS]
+        index = next((i for i, (key, _, _) in enumerate(items) if key == at), 0)
+        title = "settings · enter changes one, esc closes"
+        self.st.picker = Picker(title, items, None, self.change_setting, index, search=True, hint="type to filter")
+        self.invalidate()
+
+    def change_setting(self, key: str | None) -> None:
+        if key is None:
+            return
+        cfg, kind, label = self.cli.config_manager, settings.KINDS[key], settings.LABELS[key]
+
+        def picked(value: str | None) -> None:
+            if value is not None:
+                # "" clears the setting, not sets it: the default folder, and the Hermes config's own model.
+                self.save_setting(key, None if key in ("output_dir", "hermes_model") and not value else value)
+            self.open_settings(key)
+
+        if kind == "toggle":
+            self.save_setting(key, not cfg.get(key, True))
+            self.open_settings(key)
+        elif kind == "choice":
+            from ..tui import get_model_choices
+
+            current = cfg.get(key)
+            items = settings.choices(key, get_model_choices(), current)
+            index = next((i for i, (value, _, _) in enumerate(items) if value == current), 0)
+            self.st.picker = Picker(label, items, current, picked, index, search=True, hint="type to filter")
+        elif kind == "text":
+            items = list(settings.SUGGESTIONS.get(key, ()))
+            hint = "type a path, or pick the default below" if key == "output_dir" else "type a model id, or pick one below"
+            current = cfg.get(key) or ""
+            if current and current not in [value for value, _, _ in items]:
+                items.insert(0, (current, current, "current"))
+            index = next((i for i, (value, _, _) in enumerate(items) if value == current), 0)
+            self.st.picker = Picker(label, items, current, picked, index, typed=True, hint=hint)
+        elif key == "codex_model":
+            self.pick_codex_model()
+        elif key == "codex_effort":
+            self.pick_codex_effort(key)
+        else:
+            self.pick_opencode()
+
+    def save_setting(self, key: str, value: Any, values: dict[str, Any] | None = None) -> None:
+        """Saves a setting, or the config ``values`` behind it, and notes the change in the conversation."""
+        cfg = self.cli.config_manager
+        values = values or {key: value}
+        if all(cfg.get(k) == v for k, v in values.items()):
+            return
+        old = settings.shown(cfg, key)
+        cfg.update(values)
+        self.reload_settings()
+        self.view.event(settings.LABELS[key], old, settings.shown(cfg, key), "from the next run" if self.st.run_open else "")
+        if key == "agent_provider" and value in settings.NOTES:
+            self.view.notice(settings.NOTES[value])
+
+    def loading(self, title: str, key: str | None = "opencode") -> Picker:
+        """A list that only says something loads, so typing meanwhile is not sent as a prompt.
+
+        esc goes back to the settings at ``key``, or with no key, back to the conversation.
+        """
+
+        def picked(value: str | None) -> None:
+            if value is None:
+                if key:
+                    self.open_settings(key)
+            else:
+                self.st.picker = p  # enter while loading: keep waiting
+
+        p = Picker(title, [("", "loading…", "")], None, picked)
+        self.st.picker = p
+        self.invalidate()
+        return p
+
+    def when_loaded(self, p: Picker, then: Callable[[], None]) -> None:
+        """From a loading thread: go on only while its loading list is open; esc gave up on it otherwise."""
+
+        def go() -> None:
+            if self.st.picker is p:
+                self.buf.reset()  # what was typed while it loaded would filter the list that replaces it
+                then()
+
+        self.call_soon(go)
+
+    def settings_failed(self, message: str, key: str | None = "opencode") -> None:
+        """Says why a list could not load and leaves its loading list: for the settings at ``key``, else closed."""
+        self.view.notice(message)
+        if key:
+            self.open_settings(key)
+        else:
+            self.st.picker = None
+            self.invalidate()
+
+    def pick_opencode(self) -> None:
+        """OpenCode's providers and models come from its server, which may have to start first."""
+        p = self.loading("opencode provider · starting opencode and reading its models")
+
+        def load() -> None:
+            try:
+                catalog = asyncio.run(self.cli._load_opencode_catalog_for_settings())
+            except Exception as exc:  # noqa: BLE001  # shown in the conversation, the settings stay open
+                denied = getattr(getattr(exc, "response", None), "status_code", None) == 401
+                message = (
+                    "opencode authentication failed · set OPENCODE_SERVER_PASSWORD, and OPENCODE_SERVER_USERNAME if it is not opencode"
+                    if denied
+                    else f"could not load opencode models: {exc}"
+                )
+                self.when_loaded(p, lambda: self.settings_failed(message))
+                return
+            self.when_loaded(p, lambda: self.pick_opencode_provider(catalog))
+
+        threading.Thread(target=load, name="rae-opencode-catalog", daemon=True).start()
+
+    def pick_opencode_provider(self, catalog: dict[str, Any]) -> None:
+        cfg = self.cli.config_manager
+        items = [(provider_id, title, "") for provider_id, title in self.cli.opencode_provider_choices(catalog)]
+
+        def picked(provider_id: str | None) -> None:
+            if provider_id is None:
+                self.open_settings("opencode")
+            elif provider_id == "ollama":
+                self.pick_ollama_model()
+            else:
+                self.pick_opencode_model(catalog, provider_id)
+
+        current = cfg.get("opencode_provider")
+        index = next((i for i, (value, _, _) in enumerate(items) if value == current), 0)
+        self.st.picker = Picker("opencode provider", items, current, picked, index, search=True, hint="type to filter")
+        self.invalidate()
+
+    def pick_opencode_model(self, catalog: dict[str, Any], provider_id: str) -> None:
+        cfg = self.cli.config_manager
+        current = cfg.get("opencode_model") if cfg.get("opencode_provider") == provider_id else ""
+        items = [(model_id, title, "") for model_id, title in self.cli.opencode_model_choices(catalog, provider_id, current or "")]
+        default = str((catalog.get("default") or {}).get(provider_id) or "") if isinstance(catalog.get("default"), dict) else ""
+        ids = [model_id for model_id, _, _ in items]
+        index = ids.index(current) if current in ids else ids.index(default) if default in ids else 0  # enter keeps what is set
+        save = lambda model_id: self.save_opencode(provider_id, model_id)  # noqa: E731
+        self.st.picker = Picker(f"{provider_id} model", items, current, save, index, search=True, hint="type to filter")
+        self.invalidate()
+
+    def pick_ollama_model(self) -> None:
+        p = self.loading("ollama model · looking for installed models")
+
+        def load() -> None:
+            from ..ollama_runtime import ensure_ollama_models
+
+            try:
+                models = asyncio.run(ensure_ollama_models()).compatible_models
+            except Exception as exc:  # noqa: BLE001  # shown in the conversation, the settings stay open
+                message = f"ollama: {exc}"
+                self.when_loaded(p, lambda: self.settings_failed(message))
+                return
+            if not models:
+                none = "no installed ollama model supports tools with at least 64k context · pull one, then retry"
+                self.when_loaded(p, lambda: self.settings_failed(none))
+                return
+            items = [(m.name, m.name, f"{m.parameter_size or '?'} · {m.context_length // 1024}k context") for m in models]
+            current = self.cli.config_manager.get("opencode_model")
+
+            def show() -> None:
+                save = lambda name: self.save_opencode("ollama", name)  # noqa: E731
+                self.st.picker = Picker("ollama model", items, current, save, search=True, hint="type to filter")
+                self.invalidate()
+
+            self.when_loaded(p, show)
+
+        threading.Thread(target=load, name="rae-ollama-models", daemon=True).start()
+
+    def with_codex_models(self, title: str, key: str | None, then: Callable[[list[Any]], None]) -> None:
+        """Codex's models are the signed-in account's, which Codex has to start to read."""
+        p = self.loading(f"{title} · starting codex and reading its models", key)
+
+        def load() -> None:
+            from ..codex_engineer import codex_models
+
+            try:
+                models = asyncio.run(codex_models(self.cli.config_manager.get("codex_home")))
+            except Exception as exc:  # noqa: BLE001  # shown in the conversation, the settings stay open
+                message = f"could not load codex models: {exc}"
+                self.when_loaded(p, lambda: self.settings_failed(message, key))
+                return
+            self.when_loaded(p, lambda: then(models))
+
+        threading.Thread(target=load, name="rae-codex-models", daemon=True).start()
+
+    def pick_codex_model(self) -> None:
+        cfg = self.cli.config_manager
+
+        def show(models: list[Any]) -> None:
+            default = next((m.name for m in models if m.is_default), "")
+            # "" is Codex's default, which follows the account rather than a model rae saved.
+            items = [("", "default", default), *((m.model, m.model, m.name) for m in models)]
+            current = cfg.get("codex_model") or ""
+            if current and current not in [m.model for m in models]:
+                items.insert(1, (current, current, "current"))
+
+            def picked(model: str | None) -> None:
+                if model is not None:
+                    values: dict[str, Any] = {"codex_model": model or None}
+                    chosen = next((m for m in models if (m.model == model if model else m.is_default)), None)
+                    effort = cfg.get("codex_effort")
+                    if effort and chosen is not None and effort not in [e for e, _ in chosen.efforts]:
+                        values["codex_effort"] = None  # an effort the new model does not offer
+                        self.view.notice(f"codex effort back to default · {chosen.model} offers no {effort}")
+                    self.save_setting("codex_model", model or None, values)
+                self.open_settings("codex_model")
+
+            index = next((i for i, (value, _, _) in enumerate(items) if value == current), 0)
+            self.st.picker = Picker("codex model", items, current, picked, index, search=True, hint="type to filter")
+            self.invalidate()
+
+        self.with_codex_models("codex model", "codex_model", show)
+
+    def pick_codex_effort(self, key: str | None = None) -> None:
+        """The efforts the Codex model offers; from /settings with ``key``, else from /effort."""
+        cfg = self.cli.config_manager
+
+        def show(models: list[Any]) -> None:
+            model = cfg.get("codex_model")
+            chosen = next((m for m in models if (m.model == model if model else m.is_default)), None)
+            efforts = chosen.efforts if chosen else ()
+            items = [("", "default", chosen.default_effort if chosen else "the model's own"), *((e, e, note) for e, note in efforts)]
+            current = cfg.get("codex_effort") or ""
+            if current and current not in [e for e, _ in efforts]:
+                items.insert(1, (current, current, "current"))
+
+            def picked(effort: str | None) -> None:
+                if effort is not None:
+                    self.save_setting("codex_effort", effort or None)
+                if key:
+                    self.open_settings(key)
+
+            index = next((i for i, (value, _, _) in enumerate(items) if value == current), 0)
+            title = f"how hard {chosen.model if chosen else model or 'the model'} thinks"
+            self.st.picker = Picker(title, items, current, picked, index)
+            self.invalidate()
+
+        self.with_codex_models("codex effort", key, show)
+
+    def save_opencode(self, provider_id: str, model_id: str | None) -> None:
+        if model_id:
+            self.save_setting("opencode", None, {"opencode_provider": provider_id, "opencode_model": model_id})
+        self.open_settings("opencode")
+
+    def reload_settings(self) -> None:
+        cfg = self.cli.config_manager
+        cfg.load()
+        self.st.sdk = cfg.get("sdk", "claude")
+        self.st.model = self.cli.default_model_for_configured_sdk(self.st.sdk)
+        self.st.effort = cfg.get("claude_effort")
+        self.st.codex_effort = cfg.get("codex_effort")
+
+    # past runs
+
+    def pick_run(
+        self,
+        cmd: str,
+        title: str,
+        then: Callable[[str], None],
+        keep: Callable[[dict[str, Any]], bool] | None = None,
+        empty: str = "no runs yet",
+        current: str | None = None,
+    ) -> None:
+        if self.st.running and self.bridge.stopping:
+            # A run wrapping up records its cost last: the list waits for it rather than show the cost before.
+            self.after_run = lambda: self.pick_run(cmd, title, then, keep, empty, current)
+            return
+        runs = self.cli.session_manager.get_history(limit=len(self.cli.session_manager.history))
+        runs = [r for r in runs if keep is None or keep(r)][:HISTORY_RUNS]
+        if not runs:
+            self.view.command(cmd)
+            self.view.notice(empty)
+            return
+        items = [(r["run_id"], r["run_id"], run_summary(r)) for r in runs]
+        self.open_picker(title, items, current, lambda value: then(value) if value else None)
+
+    def show_run(self, run_id: str) -> None:
+        run = self.cli.session_manager.get_run(run_id)
+        self.view.command("/history", run_id)
+        if run is None:
+            self.view.notice(f"no run {run_id}")
+            return
+        self.view.run_details(run)
+        actions = [("resume", "resume", "continue its conversation")] if self.cli.resumable(run) else []
+        actions += [("engineer", "re-engineer", "write its client again from the capture"), ("", "back", "")]
+
+        def act(value: str | None) -> None:
+            if value == "resume":
+                self.resume(run_id)
+            elif value == "engineer":
+                self.reengineer(run_id)
+
+        self.open_picker(f"run {run_id}", actions, None, act)
+        self.invalidate()
+
+    def resume(self, run_id: str) -> None:
+        """Reopen a past run's SDK session; the next message in the bar continues its conversation."""
+        st = self.st
+        run = self.cli.session_manager.get_run(run_id)
+        self.view.command("/resume", run_id)
+        if st.running and not self.bridge.stopping:
+            self.view.notice("a run is in progress · esc stops it")
+        elif run is None:
+            self.view.notice(f"no run {run_id}")
+        elif not self.cli.resumable(run):
+            # Its conversation can still be read; there is just no session to continue it in.
+
+            def show() -> None:
+                if not self.replay(run_id, run):
+                    self.view.run_details(run)
+                self.view.notice(f"run {run_id} saved no session, so it cannot continue · /history re-engineers it")
+                self.invalidate()
+
+            if st.running:
+                self.after_run = show  # a run still closing: its last lines and the replayed ones would interleave
+            else:
+                show()
+        elif st.running or st.waiting:
+            # The open conversation only waits for a follow-up, or is already closing: end it, then switch.
+            self.after_run = lambda: self.reopen(run_id, run)
+            if st.waiting:
+                self.end_run()
+        else:
+            self.reopen(run_id, run)
+        self.invalidate()
+
+    def reopen(self, run_id: str, run: dict[str, Any]) -> None:
+        st = self.st
+        if not self.replay(run_id, run):
+            self.view.run_details(run)
+        self.view.gap()
+        st.host, st.client_name = host_in(str(run.get("prompt") or "")), ""
+        st.started, st.running, st.verb, st.kind = time.time(), True, "reopening", "other"
+        self.work(lambda: self.cli.resume_run(run_id))
+        self.invalidate()
+
+    def replay(self, run_id: str, run: dict[str, Any]) -> bool:
+        """Draws a run's saved conversation the way it looked live, so a resumed one picks up in view."""
+        try:
+            messages = MessageStore(run_id, run_output_dir(run)).load()
+        except (OSError, ValueError):  # an unreadable log, or a folder on a drive that is gone: the run's details stand in
+            messages = []
+        if not messages:
+            return False
+        st, b, ui = self.st, self.bridge, LedgerUI(self.bridge)
+        saved = (st.step, st.tokens, st.run_cost, st.started, st.run_model, st.run_sdk, st.run_effort, st.kind, st.verb, st.host, st.client_name)
+        # A conversation that waits for a follow-up keeps its own client card and folder.
+        bridge_saved = (b.verified, b.workspace, b.pending_card, b.plan, b.plan_calls, b.plan_made, b.plan_changed, b.plan_shown)
+        b.verified, b.pending_card = False, None
+        b.reset_plan()
+        # The client card reads the run's own numbers, not this session's; each result sets them as they were then.
+        usage, session = run.get("usage") or {}, run.get("sdk_session") or {}
+        st.step, st.tokens, st.run_cost = 0, usage_tokens(usage), recorded_cost(usage) or 0.0
+        st.run_model, st.run_sdk, st.run_effort = session.get("model") or run.get("model"), run_sdk(run), session.get("effort")
+        script = (run.get("paths") or {}).get("script_path")
+        b.workspace = (Path(script).parent, None) if script else None
+        # Older logs kept no tool results; there the agent's report of a working client stands for its confirmation.
+        logged_results = any(msg.get("type") == "tool_result" for msg in messages)
+        worked, since = run_durations(messages), 0.0
+        try:
+            for i, msg in enumerate(messages):
+                kind, content = msg.get("type"), msg.get("content")
+                # Older logs do not mark it, but a fresh run's first prompt is the engine's brief.
+                if kind == "prompt" and (msg.get("opening") or re.search(r"<mission>|<user_prompt>", str(content or ""))):
+                    # An engine run starts here, as live: its clock starts over, and its card waits for its own verification.
+                    b.flush_card()
+                    since, b.verified = worked[i], False
+                st.started = time.time() - (worked[i] - since)
+                if kind == "prompt":
+                    b.flush_card()
+                    self.view.user(user_words(content))
+                elif kind == "tool_start" and isinstance(content, dict):
+                    name = str(content.get("name", ""))
+                    ui.tool_start(name, content.get("input") or {}, call_id=content.get("call_id"))
+                    if not logged_results and short_name(name) == "report_client_verified":
+                        ui.tool_result(name)
+                elif kind == "tool_result" and isinstance(content, dict):
+                    ui.tool_result(str(content.get("name", "")), bool(content.get("is_error")), content.get("output"), call_id=content.get("call_id"))
+                elif kind == "thinking":
+                    ui.thinking(str(content or ""))
+                    self.view.flush_live()  # past messages appear whole, not typed out
+                elif kind == "todos" and isinstance(content, list):
+                    ui.todo_updated(content)
+                elif kind == "error":
+                    b.flush_card()
+                    self.view.error(str(content))
+                elif kind == "result" and isinstance(content, dict) and content.get("script_path"):
+                    if isinstance(content.get("usage"), dict):
+                        st.tokens, st.run_cost = usage_tokens(content["usage"]), recorded_cost(content["usage"]) or st.run_cost
+                    st.run_model = content.get("model") or session.get("model") or run.get("model")
+                    ui.success(str(content["script_path"]))
+                    b.flush_card()  # drawn now, with the numbers of its own moment
+            b.flush_card()
+        finally:
+            st.step, st.tokens, st.run_cost, st.started, st.run_model, st.run_sdk, st.run_effort, st.kind, st.verb, st.host, st.client_name = saved
+            b.verified, b.workspace, b.pending_card, b.plan, b.plan_calls, b.plan_made, b.plan_changed, b.plan_shown = bridge_saved
+        return True
+
+    def reengineer(self, run_id: str) -> None:
+        if self.st.running or self.st.waiting:
+            self.view.notice("a run is open · /new ends it first")
+            return
+        self.view.command("re-engineer", run_id)
+        self.start(run_id, mode="engineer", echo=False)
+
+    # runs
+
+    def submit(self, text: str) -> None:
+        st = self.st
+        if isinstance(st.question, Future):
+            fut, st.question = st.question, None
+            if not fut.done():
+                fut.set_result(text)
+            return
+        if not text:
+            return
+        if text.startswith("/"):
+            self.run_command(text)
+            return
+        st.scroll = 0
+        if st.running:
+            st.queue.append(text)
+        elif st.waiting:
+            self.view.user(text)
+            self.bridge.follow_ups.put(text)
+        else:
+            self.start(text)
+        self.invalidate()
+
+    def start(self, prompt: str, mode: str | None = None, echo: bool = True) -> None:
+        cli = self.cli
+        mode = mode or self.st.mode
+        model = self.st.model if self.st.sdk == "claude" else None
+        run: Callable[[], Any]
+        runner = self.runners.get(mode)
+        target = self.st.engineer_target[0] if self.st.engineer_target else None
+        if runner is not None:
+            run = (lambda: runner(prompt, model, target)) if mode == "engineer" else (lambda: runner(prompt, model))
+        elif mode == "manual":
+            run = lambda: cli.run_manual_capture(prompt=prompt, url=None, reverse_engineer=True, model=model)  # noqa: E731
+        elif mode == "engineer":
+            run = lambda: cli.engineer_from_prompt(prompt, model, run_id=target)  # noqa: E731
+        else:
+            run = lambda: cli.run_agent_capture(prompt=prompt, model=model)  # noqa: E731
+        self.launch(prompt, run, mode, echo)
+
+    def launch(self, prompt: str, run: Callable[[], Any], mode: str | None = None, echo: bool = True) -> None:
+        """Start a run in the session; its engine's UI calls stream into the conversation."""
+        st = self.st
+        mode = mode or st.mode
+        # The new run's id comes with its header; until then the status row names none.
+        st.host, st.client_name, st.run_id = host_in(prompt), "", None
+        if echo:
+            self.view.user(prompt)
+        # Manual capture first waits for the user to browse; the engine takes over the verb when it starts.
+        st.started, st.running, st.verb, st.kind = time.time(), True, "recording" if mode == "manual" else "starting", "other"
+        self.work(run)
+
+    def start_first(self) -> None:
+        """Once the app is up: the run a subcommand handed over, and the check for a newer rae."""
+        if self.first is not None:
+            (prompt, run), self.first = self.first, None
+            self.launch(prompt, run)
+        if not self.update_checked:
+            self.update_checked = True
+
+            def check() -> None:
+                from ..utils import check_for_updates
+
+                message = check_for_updates()
+                if message:
+                    self.view.notice(message)
+                    self.invalidate()
+
+            threading.Thread(target=check, name="rae-update-check", daemon=True).start()
+
+    def work(self, fn: Callable[[], Any]) -> None:
+        """Run an engine in a worker thread; its UI calls stream into the conversation through the bridge."""
+        self.bridge.failed = False
+
+        def target() -> None:
+            result: Any = None
+            try:
+                result = fn()
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                result = {"error": "interrupted"}
+            except BaseException as exc:  # noqa: BLE001  # the engine thread must never take the app down
+                self.view.error(str(exc) or type(exc).__name__)
+            finally:
+                self.finish(result)
+
+        self.worker = threading.Thread(target=target, name="rae-run", daemon=True)
+        self.worker.start()
+
+    def end_run(self) -> None:
+        """End a run that waits for a follow-up. It stays busy until its worker has wrapped up,
+        so a prompt sent meanwhile is queued for after it instead of racing its cleanup."""
+        st = self.st
+        st.waiting, st.running, st.verb, st.kind = False, True, "wrapping up", "other"
+        self.bridge.stopping = True
+        self.bridge.follow_ups.put(None)
+
+    def finish(self, result: Any) -> None:
+        st = self.st
+        # A stream cut short never closes its live message; settle it so nothing stays hidden behind it.
+        self.view.flush_live()
+        self.bridge.flush_card()
+        if st.picker is not None and st.picker.question:
+            st.picker = None
+        st.question = None
+        if isinstance(result, dict) and result.get("error") and not result.get("error_reported"):
+            if result["error"] in ("interrupted", "Agent analysis cancelled."):
+                self.view.interrupted()
+            elif not self.bridge.failed:
+                self.view.error(str(result["error"]))
+        self.bridge.task, self.bridge.stopping = None, False
+        while not self.bridge.follow_ups.empty():
+            self.bridge.follow_ups.get_nowait()
+        st.run_model = st.run_sdk = st.run_effort = None
+        st.waiting = False
+        after, self.after_run = self.after_run, None
+        if after is not None:
+            # A run asked for while this one wrapped up, such as /resume; it takes the queued prompts as its messages.
+
+            def start_after() -> None:
+                st.running = False  # on the app's thread, like start_next below
+                after()
+                if not st.running and st.queue:
+                    # It started no run, such as a replay of a run without a session: queued prompts go on as usual.
+                    self.start(st.queue.pop(0))
+
+            self.call_soon(start_after)
+            self.invalidate()
+            return
+        # Take the queued prompt before going idle: a prompt typed in between would otherwise start
+        # its own run alongside it.
+        nxt = st.queue.pop(0) if st.queue else None
+        if nxt is None:
+            st.running = False
+        else:
+
+            def start_next() -> None:
+                st.running = False  # on the app's thread, so nothing can slip in before the queued prompt
+                self.start(nxt)
+
+            self.call_soon(start_next)
+        self.invalidate()
+
+    def stop(self) -> None:
+        st = self.st
+        if st.running and self.bridge.stopping:
+            # Already on its way out: stopping it again would cut its cleanup short. Nothing queued starts after it.
+            st.queue.clear()
+            self.after_run = None
+            self.view.notice("still wrapping up · it ends as soon as its cleanup does")
+            return
+        if st.running:
+            st.queue.clear()
+            if not self.bridge.cancel():
+                self.view.notice("this run cannot be stopped from here")
+        elif st.waiting:
+            self.end_run()
+
+    def interrupt(self) -> None:
+        """ctrl+c: stop the run, then leave; with no run, clear the bar, then leave."""
+        st = self.st
+        if st.running and self.bridge.stopping:
+            self.quit()  # quitting waits for the run's cleanup instead of cutting it short
+        elif st.running or st.waiting:
+            self.stop()
+        elif self.buf.text:
+            self.buf.reset()
+        else:
+            self.quit()
+
+    def show_output(self) -> None:
+        items = list(self.transcript.full)
+
+        def page() -> None:
+            buf = io.StringIO()
+            console = Console(file=buf, force_terminal=True, color_system="truecolor", width=width(), highlight=False, theme=THEME)
+            for item in items:
+                console.print(Text.from_ansi(item.text) if isinstance(item, Raw) else item)
+            sys.stdout = self.real_out
+            try:
+                click.echo_via_pager(buf.getvalue())  # click turns on less -R itself unless LESS says otherwise
+            finally:
+                sys.stdout = cast(IO[str], self.capture)
+
+        asyncio.ensure_future(run_in_terminal(page))
+
+    def wait_for_run(self, timeout: float = 60) -> None:
+        """After quitting: let a stopped run close its SDK session, sync its files and save its history."""
+        worker = self.worker
+        if worker is not None and worker.is_alive():
+            print(" stopping the run…", file=self.real_err, flush=True)
+            with contextlib.suppress(KeyboardInterrupt):  # another ctrl+c: stop waiting, the transcript still prints
+                worker.join(timeout)
+
+    def quit(self) -> None:
+        self.st.queue.clear()  # nothing new starts on the way out
+        self.after_run = None
+        if self.st.running:
+            self.bridge.cancel()
+        if self.st.waiting:
+            self.bridge.follow_ups.put(None)
+        if self.app is not None:
+            self.app.exit()
+
+    # layout
+
+    def transcript_view(self, window: Window) -> FormattedText:
+        """The header (animated while visible) and the conversation, sliced to the window."""
+        st = self.st
+        self.view.tick()
+        lines = self.view.header_rows(theta=time.time() * 0.35) + self.transcript.lines()
+        if lines and any(text.strip() for _, text, *_ in lines[-1]):
+            lines.append([])  # a blank line between the conversation and the bar
+        rows = window.render_info.window_height if window.render_info else height() - 5
+        st.scroll = max(0, min(st.scroll, len(lines) - rows))
+        end = len(lines) - st.scroll
+        if self.view_width != width():
+            self.selection = None  # the conversation wraps anew, so its lines no longer match
+        self.view_lines, self.view_start, self.view_end, self.view_width = lines, max(0, end - rows), end, width()
+        out: list[Any] = []
+        for i, line in enumerate(lines[self.view_start : end]):
+            picked = self.selection.chars(self.view_start + i) if self.selection else None
+            # A line with no character gives the pointer no position: the window would report the first line.
+            shown = (highlight(line, *picked) if picked else line) if text_of(line) else [("", " ")]
+            out += ([("", "\n")] if i else []) + shown
+        return FormattedText(out)
+
+    def drag(self, event: MouseEvent) -> bool:
+        """A drag over the conversation selects text, copied on release; a click without one still opens a link."""
+        at = (self.view_start + event.position.y, event.position.x)
+        kind, sel = event.event_type, self.selection
+        if kind == MouseEventType.MOUSE_DOWN:
+            self.selection = Selection(at, at) if event.button == MouseButton.LEFT else None
+            return False
+        if sel is None or not sel.dragging:
+            return False
+        if kind == MouseEventType.MOUSE_MOVE and event.button == MouseButton.LEFT:
+            sel.head = at
+            return True
+        # A release here, or a move with no button held, after a release the session did not see.
+        if kind == MouseEventType.MOUSE_UP:
+            sel.head = at
+        return self.end_drag()
+
+    def drag_below(self, event: MouseEvent) -> bool:
+        """Mouse events under the conversation: a drag there reaches the end of its last line on screen."""
+        sel = self.selection
+        if sel is None or not sel.dragging or event.event_type not in (MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP):
+            return False
+        sel.head = (self.view_end - 1, LINE_END)
+        if event.event_type == MouseEventType.MOUSE_MOVE and event.button == MouseButton.LEFT:
+            return True
+        self.end_drag()
+        return True
+
+    def end_drag(self) -> bool:
+        """Copies what the drag went over; a press and release on one spot was a click."""
+        if self.selection is None:
+            return False
+        self.selection.dragging = False
+        if self.selection.anchor == self.selection.head:
+            self.selection = None
+            return False
+        self.copy_selection()
+        return True
+
+    def copy_selection(self) -> None:
+        if self.selection is None:
+            return
+        text = selected_text(self.view_lines, self.selection)
+        if not text.strip():
+            return
+        rows = text.count("\n") + 1
+        done = f"copied {rows} lines" if rows > 1 else f"copied {len(text)} characters"
+        self.copies_asked += 1
+        ticket = self.copies_asked
+
+        def copy() -> None:
+            if ticket != self.copies_asked:
+                return  # a newer selection came while this one waited its turn
+            clipboard.copy(text, lambda data: self.call_soon(lambda: self.write_raw(data)))
+            self.call_soon(lambda: self.flash(done))
+
+        self.copier.submit(copy)
+
+    def flash(self, message: str) -> None:
+        self.st.flash = (message, time.time() + 2)
+        self.invalidate()
+
+    def write_raw(self, data: str) -> None:
+        if self.app is not None:
+            self.app.output.write_raw(data)
+            self.app.output.flush()
+
+    def build(self) -> Application:
+        st, view, buf = self.st, self.view, self.buf
+        palette_open = Condition(self.palette_active)
+        picker_open = Condition(lambda: st.picker is not None)
+
+        def palette_view() -> FormattedText:
+            items = self.palette_items()
+            st.palette_index = min(st.palette_index, max(0, len(items) - 1))
+            return view.menu([(c, d, i == st.palette_index, False) for i, (c, d) in enumerate(items)], limit=len(COMMANDS))
+
+        def picker_view() -> FormattedText:
+            p = st.picker
+            if p is None:
+                return FormattedText([])
+            items = self.picker_items(p)
+            p.index = min(p.index, max(0, len(items) - 1))
+            rows = [
+                ((("◉ " if value in p.chosen else "○ ") if p.multi and value else "") + label, desc, i == p.index, value == p.current)
+                for i, (value, label, desc) in enumerate(items)
+            ]
+            return view.menu(rows, title=p.title, empty="nothing matches what you typed")
+
+        transcript_window: Window = Window(wrap_lines=False)
+        transcript_window.content = TranscriptControl(lambda: self.transcript_view(transcript_window), self.scroll, self.drag)
+        kb = self.bindings(palette_open, picker_open)
+
+        def text_window(fn: Callable[[], Any]) -> Window:
+            return Window(TextBelow(fn, self.drag_below), dont_extend_height=True)
+
+        picker_hinted = Condition(lambda: bool(st.picker and st.picker.hint))
+        placeholder = ConditionalProcessor(
+            AfterInput(self.placeholder, style=f"fg:{DIM} italic"),
+            filter=Condition(lambda: not buf.text and not st.waiting and st.question is None) & ~picker_hinted,
+        )
+        picker_hint = ConditionalProcessor(
+            AfterInput(lambda: st.picker.hint if st.picker else "", style=f"fg:{DIM} italic"),
+            filter=Condition(lambda: not buf.text) & picker_hinted,
+        )
+        follow_hint = ConditionalProcessor(
+            AfterInput("a follow-up for this run, or /new", style=f"fg:{DIM} italic"),
+            filter=Condition(lambda: not buf.text and st.waiting and st.question is None) & ~picker_hinted,
+        )
+        layout = Layout(
+            HSplit(
+                [
+                    transcript_window,
+                    ConditionalContainer(text_window(lambda: FormattedText(view.spinner())), filter=Condition(lambda: st.running)),
+                    text_window(lambda: FormattedText(view.seam())),
+                    VSplit(
+                        [
+                            Window(TextBelow(lambda: FormattedText(view.marker()), self.drag_below), dont_extend_width=True, dont_extend_height=True),
+                            Window(
+                                InputBelow(
+                                    self.drag_below, buffer=buf, lexer=InputLexer(st), input_processors=[placeholder, follow_hint, picker_hint]
+                                ),
+                                dont_extend_height=True,
+                                wrap_lines=True,
+                            ),
+                        ]
+                    ),
+                    text_window(lambda: FormattedText(view.seam_under())),
+                    ConditionalContainer(text_window(palette_view), filter=palette_open),
+                    ConditionalContainer(text_window(picker_view), filter=picker_open),
+                    ConditionalContainer(text_window(view.status), filter=~palette_open & ~picker_open),
+                ]
+            ),
+            focused_element=buf,
+        )
+        app: Application[None] = Application(
+            layout=layout,
+            key_bindings=merge_key_bindings([load_key_bindings(), kb]),
+            style=Style.from_dict({"": INK}),
+            full_screen=True,
+            mouse_support=True,
+            refresh_interval=0.05,
+            output=create_output(stdout=sys.__stdout__),
+        )
+        # Option+Delete and Option+arrows arrive as Esc and a key, so Esc waits for what follows instead of firing at
+        # once. A terminal writes such a pair in one go, so a short wait keeps a lone Esc as quick.
+        app.ttimeoutlen = app.timeoutlen = ESC_WAIT
+        return app
+
+    def scroll(self, delta: int) -> None:
+        self.st.scroll = max(0, self.st.scroll + delta)
+
+    def bindings(self, palette_open: Condition, picker_open: Condition) -> KeyBindings:  # noqa: C901  # one small handler per key
+        st, buf = self.st, self.buf
+        kb = KeyBindings()
+
+        @kb.add("enter", filter=palette_open)
+        def _(event: KeyPressEvent) -> None:
+            items = self.palette_items()
+            cmd = items[st.palette_index][0] if items else buf.text.strip()
+            buf.reset()
+            self.run_command(cmd)
+
+        @kb.add("tab", filter=palette_open)
+        def _(event: KeyPressEvent) -> None:
+            items = self.palette_items()
+            if items:
+                buf.text = items[st.palette_index][0] + " "
+                buf.cursor_position = len(buf.text)
+
+        @kb.add("up", filter=palette_open)
+        def _(event: KeyPressEvent) -> None:
+            st.palette_index = around(st.palette_index - 1, len(self.palette_items()))
+
+        @kb.add("down", filter=palette_open)
+        def _(event: KeyPressEvent) -> None:
+            st.palette_index = around(st.palette_index + 1, len(self.palette_items()))
+
+        @kb.add("space", filter=picker_open & Condition(lambda: bool(st.picker and st.picker.multi) and not buf.text))
+        def _(event: KeyPressEvent) -> None:
+            self.toggle()
+
+        @kb.add("up", filter=picker_open)
+        def _(event: KeyPressEvent) -> None:
+            self.move_in_picker(-1)
+
+        @kb.add("down", filter=picker_open)
+        def _(event: KeyPressEvent) -> None:
+            self.move_in_picker(1)
+
+        @kb.add("enter", filter=picker_open)
+        def _(event: KeyPressEvent) -> None:
+            self.choose()
+
+        @kb.add("enter", filter=~palette_open & ~picker_open)
+        def _(event: KeyPressEvent) -> None:
+            text = buf.text.strip()
+            if text:
+                buf.append_to_history()
+            buf.reset()
+            self.submit(text)
+
+        @kb.add("pageup")
+        def _(event: KeyPressEvent) -> None:
+            self.scroll(max(1, height() // 2))
+
+        @kb.add("pagedown")
+        def _(event: KeyPressEvent) -> None:
+            self.scroll(-max(1, height() // 2))
+
+        @kb.add("end", filter=Condition(lambda: not buf.text))
+        def _(event: KeyPressEvent) -> None:
+            st.scroll = 0
+
+        @kb.add("s-tab")
+        def _(event: KeyPressEvent) -> None:
+            modes = list(MODES)
+            st.mode = modes[(modes.index(st.mode) + 1) % len(modes)]
+            self.find_target()
+
+        @kb.add("c-e")
+        def _(event: KeyPressEvent) -> None:
+            self.cycle_effort()
+
+        @kb.add("c-o")
+        def _(event: KeyPressEvent) -> None:
+            self.show_output()
+
+        @kb.add("escape")
+        def _(event: KeyPressEvent) -> None:
+            if st.picker is not None:
+                p, st.picker = st.picker, None
+                buf.reset()  # what was typed for the list, or while it loaded, would filter the next one
+                p.on_pick(None)
+            elif isinstance(st.question, Future):
+                fut, st.question = st.question, None
+                if not fut.done():
+                    fut.set_result("")
+            elif buf.text.startswith("/"):
+                buf.reset()
+            else:
+                self.stop()
+
+        @kb.add("c-c")
+        def _(event: KeyPressEvent) -> None:
+            self.interrupt()
+
+        @kb.add("c-d")
+        def _(event: KeyPressEvent) -> None:
+            self.quit()
+
+        return kb
+
+    # lifecycle
+
+    async def run(self) -> None:
+        self.loop = asyncio.get_running_loop()
+        self.app = self.build()
+        activate(self.bridge)
+        # A kill or a closed terminal quits like ctrl+d: the run stops (a manual capture saves its HAR, an OpenCode
+        # run aborts its session), then run_session waits for its worker and exits normally.
+        for name in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                with contextlib.suppress(NotImplementedError, RuntimeError):
+                    self.loop.add_signal_handler(getattr(signal, name), self.quit)
+        sys.stdout = sys.stderr = cast(IO[str], self.capture)
+        # The SDK warns once that bypassPermissions shadows can_use_tool; it is not for the user.
+        warnings.filterwarnings("ignore", message=".*can_use_tool.*")
+        try:
+            await self.app.run_async(pre_run=self.start_first)
+        finally:
+            sys.stdout, sys.stderr = self.real_out, self.real_err
+            activate(None)
+
+    def print_transcript(self) -> None:
+        """Leave the session in the terminal's history, like a normal command's output."""
+        self.view.flush_live()
+        console = Console(force_terminal=sys.stdout.isatty(), highlight=False, theme=THEME)
+        for line in self.view.header_text():
+            console.print(line)
+        for item in self.transcript.items:
+            renderable: RenderableType = Text.from_ansi(item.text) if isinstance(item, Raw) else item
+            console.print(renderable)
+
+
+def run_session(
+    mode: str = "agent",
+    model: str | None = None,
+    first: tuple[str, Callable[[], Any]] | None = None,
+    runner: Callable[..., Any] | None = None,
+    target: str | None = None,
+) -> None:
+    """Entry point for the interactive CLI: the full-screen session.
+
+    A subcommand hands over its options: ``first`` is its prompt and run, with every option bound, and
+    ``runner(prompt, model)`` starts the prompts typed later in ``mode`` with the options that still apply.
+    ``target`` is the run engineer mode works on.
+    """
+    session = Session()
+    session.st.mode = mode
+    if model:
+        session.st.model = model
+    session.first = first
+    if runner is not None:
+        session.runners[mode] = runner
+    run = session.cli.session_manager.get_run(target) if target else None
+    if run is not None:
+        session.st.engineer_target, session.st.engineer_chosen = (str(target), str(run.get("prompt") or "")), True
+    session.find_target()
+    try:
+        asyncio.run(session.run())
+    except KeyboardInterrupt:
+        pass
+    # The loop's handlers went with it; another kill while the run wraps up still exits normally, so atexit runs.
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), exit_on_signal)
+    session.wait_for_run()
+    session.print_transcript()
+
+
+def exit_on_signal(signum: int, _frame: Any) -> None:
+    raise SystemExit(128 + signum)
+

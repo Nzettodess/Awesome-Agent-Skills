@@ -1,0 +1,132 @@
+---
+title: Scripted usage
+description: Drive the CLI from another agent or a wrapper script with --no-interactive and --json.
+---
+
+The CLI can be driven by another agent, a CI job, or a wrapper script. Use
+`agent --json` or `engineer --json` for a single machine-readable result,
+`list --json` and `show --json` for history inspection, and `run --json` to
+execute generated scripts without contaminating stdout. For coding agents, the
+[agent skill](/docs/cli/coding-agents) wraps this contract.
+
+When `--json` is set:
+
+- **stdout** contains exactly one JSON document (the final result).
+- **stderr** receives Rich logs and progress updates.
+- The process exits with a **stable exit code**.
+
+When `--json-stream` is set (on `agent`, `engineer`, and `run`):
+
+- **stdout** receives **NDJSON**: one JSON object per line while the run progresses, then a final `{"event":"result",...}` line with the same fields as `--json`.
+- **stderr** receives Rich logs (same as `--json`).
+- Implies **non-interactive** mode. Engineer runs answer `AskUserQuestion`
+  with a fixed non-interactive message; agent runs do not prompt on stdin and
+  skip human answers; script runs never open the run/script picker or install
+  confirm prompt.
+
+## Examples
+
+### Run an autonomous capture and read the result as JSON
+
+```bash
+reverse-api-engineer agent \
+  --prompt "capture the public jobs api" \
+  --url https://example.com/jobs \
+  --json | jq
+```
+
+### Stream progress as NDJSON (wrapper agents)
+
+```bash
+reverse-api-engineer agent \
+  --prompt "capture the public jobs api" \
+  --url https://example.com/jobs \
+  --json-stream
+```
+
+Common event types for `agent` and `engineer`: `run_started` (includes `run_id`, `sdk`; agent runs also include `mode`, `url`, `command`), `tool_start`, `tool_end`, `thinking`, `ask_user_skipped`, `client_executed`, `result`.
+
+`client_executed` (`{"event": "client_executed", "script_path": "..."}`) fires
+when the agent calls the dedicated `report_client_verified` tool after reporting
+that it ran the generated client live and confirmed it works. The tool emits
+the event at most once per SDK session; it records the agent's verification
+report rather than running the client itself. Wrapper scripts can use this
+early signal to react before the run otherwise ends, since a long session can
+continue with unrelated cleanup or documentation work. Emitted by the Claude
+and Codex backends; not by the OpenCode, Copilot, Cursor, or Hermes backends.
+
+### Validate an agent run without launching a browser
+
+```bash
+reverse-api-engineer agent \
+  --prompt "capture the public jobs api" \
+  --url https://example.com/jobs \
+  --dry-run | jq
+```
+
+`--dry-run` implies `--json`, validates prompt/URL/config/environment, returns
+`would_run` plus `checks`, and exits `0` when all checks pass or `1` when any
+check has `status: "error"`.
+
+### List and inspect runs
+
+```bash
+# empty history returns []
+reverse-api-engineer list --json
+
+# inspect a run
+reverse-api-engineer show <run_id> --json
+```
+
+### Run a generated script from another agent
+
+```bash
+reverse-api-engineer run <run_id> --file api_client.py \
+  --json --auto-install -- --org acme
+```
+
+- `--json`: captures the generated script's stdout/stderr into the result
+  payload and implies `--no-interactive`.
+- `--json-stream`: emits NDJSON events such as `run_resolved`,
+  `script_selected`, `process_started`, and final `result`.
+- `--no-interactive`: never open the run picker, script picker, or install
+  confirm.
+- `--auto-install`: install missing deps on retry without asking.
+- Everything after `--` is forwarded to the underlying script.
+
+## `agent --json` output schema
+
+| Field            | Type                | Notes                                                                  |
+|------------------|---------------------|------------------------------------------------------------------------|
+| `schema_version` | `int`               | Currently `1`. Bumped on breaking changes.                             |
+| `status`         | `"ok" \| "error"`   | Top-level result.                                                      |
+| `run_id`         | `string \| null`    | Stable id for follow-up `show` / `engineer` / `run` calls.             |
+| `prompt`         | `string`            | The prompt passed in.                                                  |
+| `url`            | `string \| null`    | Optional starting URL.                                                 |
+| `mode`           | `string \| null`    | Provider (`"auto"`, `"chrome-mcp"`, `"agent-browser"`).                |
+| `har_path`       | `string \| null`    | Absolute path to the captured HAR (`recording.har`).                   |
+| `script_path`    | `string \| null`    | Absolute path to the generated client. It exists whenever `status` is `"ok"`; a run that ends without writing it reports `engine_failure`. |
+| `usage`          | `object`            | Normalized token plus cost usage (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `total_cost_usd`) plus raw SDK usage under `raw`. |
+| `error`          | `string \| null`    | Human-readable error message when `status == "error"`.                 |
+| `error_kind`     | `string \| null`    | Machine-readable error category such as `misuse`, `network`, or `engine_failure`. |
+
+`engineer --json` uses the same top-level contract, minus agent-only fields
+(`url`, `mode`, `har_path`) and plus `fresh`. `run --json` uses the same
+`schema_version`, `status`, `error`, and `error_kind` fields, plus
+`identifier`, `run_id`, `script_path`, `script_args`, `returncode`, `stdout`,
+`stderr`, and `scripts`. `show --json` includes `schema_version`, `status`,
+`error`, and `error_kind` in addition to the run details.
+
+## Exit codes
+
+| Code | Meaning                                                                  |
+|------|--------------------------------------------------------------------------|
+| `0`  | Success.                                                                 |
+| `1`  | Runtime error (capture or engineering failed; details in `error`).       |
+| `2`  | Misuse: required arg missing under `--no-interactive` / `--json`.        |
+
+For `run`, the exit code is the underlying script's return code when a script
+executes, or `1` if no script was found, no exact script was selected, or
+`--no-interactive` would otherwise have to prompt. Under `--json`, the
+generated script's stdout and stderr are captured into JSON fields instead of
+being written directly to stdout.

@@ -1,0 +1,106 @@
+---
+title: Model selection
+description: Choose a model for Claude, OpenCode, Codex, Copilot, or Cursor.
+---
+
+## Claude models
+
+| Model         | When to pick it                                                          |
+|---------------|--------------------------------------------------------------------------|
+| **Sonnet 5.5** | Balanced cost and quality, faster and cheaper than Sonnet 4.6.          |
+| **Opus 5.5**  | Complex APIs (many endpoints, nested auth, polymorphic responses).       |
+| **Opus 4.6**  | The previous Opus, for comparison or when a run needs it.                |
+| **Haiku 5.5** | Cheapest and fastest. Good for simple endpoints or quick iterations.     |
+
+Sonnet 4.6 stays the default until you choose another model. It and Haiku 4.5
+are no longer offered in the pickers, but `--model` and `config.json` still
+accept them.
+
+## Change the model
+
+In the session, type `/model`.
+
+Or pass a model to a direct command:
+
+```bash
+reverse-api-engineer agent --prompt "capture the jobs api" --model claude-sonnet-5-5
+```
+
+Or edit `~/.reverse-api/config.json` directly:
+
+```json
+{
+  "claude_code_model": "claude-opus-5-5"
+}
+```
+
+## Effort
+
+Claude models take an effort level, from `low` to `max`: how hard the agent
+thinks before acting. Higher effort is slower and costs more, and helps on hard
+captures. Set it with `/effort` or `Ctrl+E` in the session, or with
+`claude_effort` in the config. Leaving it unset keeps each model's default:
+`medium` for Opus 5.5 and Haiku 5.5, `high` for the others. Haiku 4.5 has no
+effort setting.
+
+## Config file reference
+
+The full default config:
+
+```json
+{
+  "agent_provider": "chrome-mcp",
+  "agent_browser_notes": "",
+  "agent_browser_npx_package": "agent-browser@0",
+  "claude_code_model": "claude-sonnet-4-6",
+  "claude_setting_sources": [],
+  "claude_effort": null,
+  "cursor_model": "composer-2.5",
+  "cursor_web_search": true,
+  "cursor_setting_sources": null,
+  "copilot_model": "gpt-5",
+  "codex_model": null,
+  "codex_effort": null,
+  "codex_home": null,
+  "opencode_model": "big-pickle",
+  "opencode_provider": "opencode",
+  "opencode_auto_start": true,
+  "opencode_base_url": "http://127.0.0.1:4096",
+  "opencode_npx_package": "opencode-ai@latest",
+  "ollama_auto_start": true,
+  "ollama_base_url": "http://127.0.0.1:11434",
+  "output_dir": null,
+  "output_language": "python",
+  "real_time_sync": true,
+  "sdk": "claude"
+}
+```
+
+## OpenCode users
+
+If you've configured the OpenCode SDK, choose **opencode provider / model** in
+`/settings`. RAE loads the connected providers and active tool-capable models
+from your OpenCode server, marks free OpenCode options, and saves the pair
+together. Advanced users can still edit the `opencode_model` and
+`opencode_provider` keys directly.
+
+For Ollama, set `opencode_provider` to `ollama`. The `/settings` flow discovers
+installed models and only offers those that report tool calling plus the 64k
+context OpenCode requires. RAE does not pull models automatically.
+
+## Codex users
+
+Codex uses `codex_model`. Its default, `null`, runs Codex's default model for
+your account. Choose **codex model** in `/settings` to pick from the models
+your account offers, or set a model id such as `"gpt-6.1-sol"` in the config.
+
+Codex models take their own effort levels, which differ from model to model.
+`/effort` in a Codex session, or **codex effort** in `/settings`, lists the
+levels the model offers; `codex_effort: null` keeps the model's default.
+Changing the model drops an effort the new model does not offer.
+
+## Copilot and Cursor users
+
+Copilot uses `copilot_model` (default `gpt-5`). Cursor uses `cursor_model`
+(default `composer-2.5`) plus `cursor_web_search` / `cursor_setting_sources`
+for controlling which Cursor settings layers are loaded.

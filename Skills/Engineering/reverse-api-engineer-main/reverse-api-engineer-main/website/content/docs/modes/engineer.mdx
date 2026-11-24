@@ -1,0 +1,75 @@
+---
+title: Engineer mode
+description: Re-run AI generation on an existing capture without re-browsing.
+---
+
+Engineer mode skips the capture step. It takes an existing run (HAR plus
+metadata) and re-runs the AI generation pass. Useful when you want to try a
+different model, prompt, or output language without re-doing the browser
+work.
+
+It needs the run's HAR, so it works on runs from the `auto` and
+`agent-browser` providers and from manual mode. Runs from the default
+`chrome-mcp` provider save no HAR; `engineer` stops right away for them
+(`error_kind: misuse`, exit code 2), and you run `agent` again instead.
+
+## When to use it
+
+- The first generation missed something. Try Opus 4.6, or tweak the prompt.
+- You want the same capture exported to a different language (Python to TS).
+- You want to iterate on the generated client without paying the cost of
+  re-capturing the site.
+
+## How to run it
+
+Interactive:
+
+```bash
+reverse-api-engineer
+# switch to engineer mode with Shift+Tab
+```
+
+Engineer mode works on your latest run with a HAR. The line above the input
+names it, with its id and prompt. Type what should change, such as
+`add pagination`, and rae regenerates that run's client with it. `/engineer`
+lists the runs that have a HAR to pick another one, and a run id typed on its
+own regenerates that run as it was.
+
+The run's cost in `/history` includes every re-engineer of it, and the client
+card shows what the last one cost.
+
+Direct:
+
+```bash
+reverse-api-engineer engineer <run_id>
+```
+
+From another agent or CI wrapper:
+
+```bash
+reverse-api-engineer engineer <run_id> \
+  --prompt "add pagination support" \
+  --json-stream
+```
+
+Use `--json` when you only need the final result. Both JSON modes suppress
+follow-up prompts and keep machine-readable output on stdout.
+
+Find the `run_id` of a previous run with:
+
+```bash
+reverse-api-engineer list
+```
+
+Or `--json` for a machine-parseable list:
+
+```bash
+reverse-api-engineer list --json | jq
+```
+
+## What gets regenerated
+
+Everything the AI emits gets rebuilt: `api_client.*`, `example_usage.*`,
+`README.md`. The HAR itself is unchanged. Engineer mode writes back to the
+same run's scripts directory, so use version control or copy the output first
+if you want to compare iterations side by side.

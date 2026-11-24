@@ -1,0 +1,863 @@
+"""Tests for the agent-friendly CLI surface (--json, --no-interactive, payload shape)."""
+
+import asyncio
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+from click.testing import CliRunner
+
+from reverse_api.cli import (
+    AGENT_JSON_SCHEMA_VERSION,
+    _build_agent_payload,
+    agent,
+    list_runs,
+    main,
+    show_run,
+)
+from reverse_api.session import SessionManager
+
+EXPECTED_PAYLOAD_KEYS = {
+    "schema_version",
+    "status",
+    "run_id",
+    "prompt",
+    "url",
+    "mode",
+    "har_path",
+    "script_path",
+    "usage",
+    "error",
+    "error_kind",
+}
+
+
+class TestBuildAgentPayload:
+    """Stable shape for the `agent --json` payload."""
+
+    def test_success_shape(self, tmp_path):
+        client = tmp_path / "scripts" / "api_client.py"
+        client.parent.mkdir()
+        client.write_text("")
+        payload = _build_agent_payload(
+            {
+                "run_id": "abc123",
+                "mode": "auto",
+                "script_path": str(client),
+                # Mix of Claude SDK keys to exercise normalization (cache_creation_input_tokens
+                # → cache_write_tokens, estimated_cost_usd → total_cost_usd).
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 100,
+                    "cache_read_input_tokens": 50,
+                    "estimated_cost_usd": 0.001,
+                },
+            },
+            prompt="capture the X api",
+            url="https://example.com",
+        )
+        assert payload["schema_version"] == AGENT_JSON_SCHEMA_VERSION
+        assert set(payload.keys()) == EXPECTED_PAYLOAD_KEYS
+        # No run produced a HAR yet on disk in this test, so har_path is None
+        assert payload["status"] == "ok"
+        assert payload["run_id"] == "abc123"
+        assert payload["mode"] == "auto"
+        assert payload["prompt"] == "capture the X api"
+        assert payload["url"] == "https://example.com"
+        # Stable normalized usage subset
+        assert payload["usage"]["input_tokens"] == 1
+        assert payload["usage"]["output_tokens"] == 2
+        assert payload["usage"]["cache_write_tokens"] == 100
+        assert payload["usage"]["cache_read_tokens"] == 50
+        assert payload["usage"]["total_cost_usd"] == 0.001
+        # Raw SDK shape still available for power users
+        assert payload["usage"]["raw"]["cache_creation_input_tokens"] == 100
+        assert payload["error"] is None
+        assert payload["error_kind"] is None
+        # Must be JSON-serializable (no Path objects sneaking through)
+        json.dumps(payload)
+
+
+    def test_unwritten_client_is_an_engine_failure(self, tmp_path):
+        payload = _build_agent_payload(
+            {"run_id": "abc123", "mode": "chrome-mcp", "script_path": str(tmp_path / "api_client.py"), "usage": {}},
+            prompt="x",
+            url=None,
+        )
+        assert payload["status"] == "error"
+        assert payload["error_kind"] == "engine_failure"
+        assert "without writing a client" in payload["error"]
+    def test_no_run_id_is_error(self):
+        payload = _build_agent_payload({}, prompt="x", url=None)
+        assert payload["status"] == "error"
+        assert payload["error"]
+        assert payload["run_id"] is None
+        assert payload["error_kind"] == "engine_failure"
+
+    def test_explicit_error_overrides(self):
+        payload = _build_agent_payload(
+            {"run_id": "abc", "mode": "auto"},
+            prompt="x",
+            url=None,
+            error="boom",
+        )
+        assert payload["status"] == "error"
+        assert payload["error"] == "boom"
+
+    def test_inner_error_propagates(self):
+        payload = _build_agent_payload(
+            {"run_id": "abc", "mode": "auto", "error": "inner"},
+            prompt="x",
+            url=None,
+        )
+        assert payload["status"] == "error"
+        assert payload["error"] == "inner"
+
+    def test_har_path_resolves_against_provided_output_dir(self, tmp_path):
+        """har_path must use the user's --output-dir, not the default config root.
+
+        Regression for cubic-dev-ai PR #61 review (P2).
+        """
+        run_id = "deadbeef0001"
+        run_har_dir = tmp_path / "har" / run_id
+        run_har_dir.mkdir(parents=True)
+        (run_har_dir / "recording.har").write_text("{}")
+
+        with patch("reverse_api.cli.get_har_dir") as gethar:
+            gethar.side_effect = lambda rid, odir: tmp_path / "har" / rid
+            payload = _build_agent_payload(
+                {"run_id": run_id, "mode": "auto"},
+                prompt="x",
+                url=None,
+                output_dir=str(tmp_path),
+            )
+
+        gethar.assert_called_with(run_id, str(tmp_path))
+        assert payload["har_path"] == str(run_har_dir / "recording.har")
+
+
+class TestAgentCommandJson:
+    """`agent` click command's --json / --no-interactive behavior."""
+
+    def test_json_without_prompt_exits_2(self):
+        runner = CliRunner()
+        result = runner.invoke(agent, ["--json"])
+        assert result.exit_code == 2
+        payload = json.loads(result.stdout.strip())
+        assert payload["status"] == "error"
+        assert "prompt" in payload["error"].lower()
+
+    def test_json_without_prompt_emits_full_schema(self):
+        """Misuse JSON must contain every documented field (nulled), not a 3-key shortcut.
+
+        Regression for cubic-dev-ai PR #61 review (P2).
+        """
+        runner = CliRunner()
+        result = runner.invoke(agent, ["--json"])
+        payload = json.loads(result.stdout.strip())
+        assert set(payload.keys()) == EXPECTED_PAYLOAD_KEYS
+
+    def test_no_interactive_without_prompt_exits_2(self):
+        runner = CliRunner()
+        result = runner.invoke(agent, ["--no-interactive"])
+        assert result.exit_code == 2
+        # Plain text on stderr, not JSON, since --json wasn't requested
+        assert "prompt" in (result.stderr or result.output).lower()
+
+    def test_json_emits_payload_on_success(self):
+        runner = CliRunner()
+        fake_result = {
+            "run_id": "deadbeef0001",
+            "mode": "auto",
+            "script_path": None,
+            "usage": {"total_cost": 0.0},
+        }
+        with patch("reverse_api.cli.run_agent_capture", return_value=fake_result):
+            result = runner.invoke(agent, ["--json", "-p", "capture the X api"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "ok"
+        assert payload["run_id"] == "deadbeef0001"
+        assert payload["prompt"] == "capture the X api"
+
+    def test_json_emits_error_payload_on_exception(self):
+        runner = CliRunner()
+        with patch("reverse_api.cli.run_agent_capture", side_effect=RuntimeError("boom")):
+            result = runner.invoke(agent, ["--json", "-p", "x"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "error"
+        assert payload["error"] == "boom"
+
+
+class TestListJsonEmpty:
+    """`list --json` should emit a JSON array even when there is no history."""
+
+    def test_empty_history_emits_empty_array(self, tmp_path):
+        runner = CliRunner()
+        # Repoint session_manager.history to empty list for the test
+        with patch("reverse_api.cli.session_manager") as sm:
+            sm.history = []
+            result = runner.invoke(list_runs, ["--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.stdout.strip()) == []
+
+
+class TestShowJsonNotFound:
+    """`show <id> --json` should emit a structured error and exit non-zero."""
+
+    def test_unknown_run_id_emits_error(self):
+        runner = CliRunner()
+        with patch("reverse_api.cli.session_manager") as sm:
+            sm.get_run.return_value = None
+            sm.history = []
+            result = runner.invoke(show_run, ["doesnotexist", "--json"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip())
+        assert payload["schema_version"] == AGENT_JSON_SCHEMA_VERSION
+        assert payload["status"] == "error"
+        assert payload["error_kind"] == "engine_failure"
+        assert "error" in payload
+        assert payload["run_id"] == "doesnotexist"
+
+
+class TestListAndShowCost:
+    """`list` and `show` report the cost under whichever key the run recorded it."""
+
+    @pytest.mark.parametrize(
+        ("usage", "cost"),
+        [
+            ({"estimated_cost_usd": 0.42}, 0.42),
+            ({"estimated_cost_usd": 0.0}, 0.0),
+            ({"cost": 0.13}, 0.13),
+            ({"total_cost": 0.07}, 0.07),
+            ({"estimated_cost_usd": 0.42, "total_cost": 0.07, "cost": 0.13}, 0.42),
+            ({}, None),
+        ],
+    )
+    def test_cost_from_each_recorded_key(self, tmp_path, monkeypatch, usage, cost):
+        monkeypatch.chdir(tmp_path)
+        run = {"run_id": "r1", "prompt": "jobs", "mode": "agent", "usage": usage}
+        runner = CliRunner()
+        with patch("reverse_api.cli.session_manager") as sm:
+            sm.history = [run]
+            sm.get_run.return_value = run
+            listed = runner.invoke(list_runs, ["--json"])
+            shown = runner.invoke(show_run, ["r1", "--json"])
+        assert listed.exit_code == 0 and shown.exit_code == 0
+        assert json.loads(listed.stdout)[0]["cost"] == cost
+        assert json.loads(shown.stdout)["cost"] == cost
+
+    def test_an_agent_run_shows_the_sdk_its_session_ran_on(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        run = {"run_id": "r1", "prompt": "jobs", "mode": "chrome-mcp", "sdk": None, "usage": {}, "sdk_session": {"id": "t", "sdk": "codex"}}
+        runner = CliRunner()
+        with patch("reverse_api.cli.session_manager") as sm:
+            sm.history = [run]
+            sm.get_run.return_value = run
+            listed = runner.invoke(list_runs, ["--json"])
+            shown = runner.invoke(show_run, ["r1", "--json"])
+        assert json.loads(listed.stdout)[0]["sdk"] == "codex" and json.loads(shown.stdout)["sdk"] == "codex"
+
+    def test_the_tables_print_the_cost(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        run = {"run_id": "r1", "prompt": "jobs", "mode": "agent", "usage": {"estimated_cost_usd": 0.42}}
+        runner = CliRunner()
+        with patch("reverse_api.cli.session_manager") as sm:
+            sm.history = [run]
+            sm.get_run.return_value = run
+            listed = runner.invoke(list_runs, ["--full"])
+            shown = runner.invoke(show_run, ["r1"])
+        assert "$0.42" in listed.output
+        assert "$0.42" in shown.output
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            {"cache_creation_input_tokens": 50, "cache_read_input_tokens": 100},  # Claude
+            {"cache_write_tokens": 50, "cache_read_tokens": 100},  # Copilot, Cursor
+            {"cache_creation_tokens": 50, "cache_read_tokens": 100},  # OpenCode
+        ],
+    )
+    def test_show_reads_each_sdks_cache_counts(self, tmp_path, monkeypatch, usage):
+        monkeypatch.chdir(tmp_path)
+        run = {"run_id": "r1", "prompt": "jobs", "mode": "agent", "usage": {"input_tokens": 10, **usage}}
+        with patch("reverse_api.cli.session_manager") as sm:
+            sm.get_run.return_value = run
+            shown = json.loads(CliRunner().invoke(show_run, ["r1", "--json"]).stdout)
+        assert (shown["input_tokens"], shown["cache_creation_input_tokens"], shown["cache_read_input_tokens"]) == (10, 50, 100)
+
+
+# ---------------------------------------------------------------------------
+# `run` command: --no-interactive and --auto-install behavior
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def multi_script_env(tmp_path):
+    """Fake a run with multiple .py scripts on disk so the picker would normally fire."""
+    history_path = tmp_path / "history.json"
+    sm = SessionManager(history_path)
+    sm.add_run(
+        "abc123def456",
+        "capture the ashby jobs api",
+        mode="manual",
+        paths={"script_path": "/scripts/abc123def456/api_client.py"},
+    )
+    scripts_dir = tmp_path / "scripts" / "abc123def456"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "api_client.py").write_text("print('client')")
+    (scripts_dir / "example_usage.py").write_text("print('example')")
+
+    patches = [
+        patch("reverse_api.cli.session_manager", sm),
+        patch("reverse_api.cli.config_manager", MagicMock(get=MagicMock(return_value=None))),
+        patch("reverse_api.utils.get_base_output_dir", return_value=tmp_path),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        yield tmp_path, sm
+    finally:
+        for p in patches:
+            p.stop()
+
+
+class TestRunCommandNonInteractive:
+    """`run` should never block on questionary when --no-interactive or --auto-install is set."""
+
+    def test_multiple_scripts_with_no_interactive_errors(self, multi_script_env):
+        runner = CliRunner()
+        with patch("questionary.select") as mock_select:
+            result = runner.invoke(main, ["run", "abc123def456", "--no-interactive"])
+        assert result.exit_code != 0
+        # Picker must NOT have been opened
+        mock_select.assert_not_called()
+        assert "multiple scripts" in result.output.lower() or "available" in result.output.lower()
+
+    def test_multiple_scripts_with_auto_install_errors_on_picker(self, multi_script_env):
+        """--auto-install also implies non-interactive for the picker."""
+        runner = CliRunner()
+        with patch("questionary.select") as mock_select:
+            result = runner.invoke(main, ["run", "abc123def456", "--auto-install"])
+        assert result.exit_code != 0
+        mock_select.assert_not_called()
+
+    def test_no_interactive_with_file_flag_runs(self, multi_script_env):
+        """--file disambiguates and the script runs without prompting."""
+        runner = CliRunner()
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("subprocess.run", return_value=ok) as mock_sub, patch("questionary.select") as mock_select:
+            result = runner.invoke(
+                main, ["run", "abc123def456", "--file", "api_client.py", "--no-interactive"]
+            )
+        assert result.exit_code == 0
+        mock_select.assert_not_called()
+        assert mock_sub.called
+
+    def test_auto_install_skips_questionary_confirm(self, multi_script_env):
+        """When the script raises ModuleNotFoundError, --auto-install skips the confirm prompt."""
+        runner = CliRunner()
+        # First subprocess.run returns missing-module error; subsequent ones (venv setup, pip install, retry)
+        # all succeed.
+        first = MagicMock(returncode=1, stdout="", stderr="ModuleNotFoundError: No module named 'foo'")
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def fake_subprocess(cmd, *args, **kwargs):
+            # Detect the script execution call by looking for the .py path
+            cmd_str = " ".join(str(c) for c in cmd)
+            if cmd_str.endswith("api_client.py") or "api_client.py" in cmd_str:
+                # First and second invocation of the script path
+                fake_subprocess.script_calls += 1
+                if fake_subprocess.script_calls == 1:
+                    return first
+            return ok
+
+        fake_subprocess.script_calls = 0
+
+        with patch("subprocess.run", side_effect=fake_subprocess), patch("questionary.confirm") as mock_confirm:
+            result = runner.invoke(
+                main, ["run", "abc123def456", "--file", "api_client.py", "--auto-install"]
+            )
+        # questionary.confirm must never have been called
+        mock_confirm.assert_not_called()
+        # Final exit code should be from the retry (success)
+        assert result.exit_code == 0
+
+    def test_no_interactive_skips_confirm_and_does_not_install(self, multi_script_env):
+        """--no-interactive (without --auto-install) must NOT install missing deps; it surfaces the failure."""
+        runner = CliRunner()
+        first = MagicMock(returncode=1, stdout="", stderr="ModuleNotFoundError: No module named 'foo'")
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def fake_subprocess(cmd, *args, **kwargs):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "api_client.py" in cmd_str:
+                fake_subprocess.script_calls += 1
+                if fake_subprocess.script_calls == 1:
+                    return first
+            # pip install must NOT happen — assert it
+            if "pip" in cmd_str and "install" in cmd_str and "foo" in cmd_str:
+                pytest.fail("pip should not have been called to install 'foo' under --no-interactive")
+            return ok
+
+        fake_subprocess.script_calls = 0
+
+        with patch("subprocess.run", side_effect=fake_subprocess), patch("questionary.confirm") as mock_confirm:
+            result = runner.invoke(
+                main, ["run", "abc123def456", "--file", "api_client.py", "--no-interactive"]
+            )
+        mock_confirm.assert_not_called()
+        # Exit propagates the original failure
+        assert result.exit_code != 0
+
+    def test_fuzzy_multiple_matches_with_no_interactive_errors_without_picker(self, tmp_path):
+        """--no-interactive must fail fast even before script selection."""
+        sm = SessionManager(tmp_path / "history.json")
+        sm.add_run("abc123def456", "capture ashby api", mode="manual")
+        sm.add_run("def789ghi012", "capture hubspot api", mode="agent")
+
+        runner = CliRunner()
+        with (
+            patch("reverse_api.cli.session_manager", sm),
+            patch("questionary.select") as mock_select,
+        ):
+            result = runner.invoke(main, ["run", "api", "--no-interactive"])
+        assert result.exit_code != 0
+        assert "Multiple runs match" in result.output
+        mock_select.assert_not_called()
+
+
+class TestRunCommandJson:
+    """`run --json` / `--json-stream` should be safe for wrapper agents."""
+
+    def _precreate_venv(self, tmp_path):
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("#!/bin/sh")
+        (venv / "bin" / "pip").write_text("#!/bin/sh")
+
+    def test_run_json_captures_script_output(self, multi_script_env):
+        tmp_path, _ = multi_script_env
+        self._precreate_venv(tmp_path)
+
+        runner = CliRunner()
+        completed = MagicMock(returncode=0, stdout="hello\n", stderr="warn\n")
+        with patch("subprocess.run", return_value=completed):
+            result = runner.invoke(
+                main,
+                ["run", "abc123def456", "--file", "api_client.py", "--json"],
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip())
+        assert payload["schema_version"] == AGENT_JSON_SCHEMA_VERSION
+        assert payload["status"] == "ok"
+        assert payload["run_id"] == "abc123def456"
+        assert payload["script_path"].endswith("api_client.py")
+        assert payload["stdout"] == "hello\n"
+        assert payload["stderr"] == "warn\n"
+
+    def test_run_json_multiple_scripts_requires_file_without_picker(self, multi_script_env):
+        runner = CliRunner()
+        with patch("questionary.select") as mock_select:
+            result = runner.invoke(main, ["run", "abc123def456", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip())
+        assert payload["status"] == "error"
+        assert payload["error_kind"] == "misuse"
+        assert "multiple scripts" in payload["error"]
+        assert {s["name"] for s in payload["scripts"]} == {"api_client.py", "example_usage.py"}
+        mock_select.assert_not_called()
+
+    def test_run_json_auto_install_refuses_invalid_package_name(self, multi_script_env):
+        """A crafted ModuleNotFoundError must not smuggle pip options into auto-install."""
+        tmp_path, _ = multi_script_env
+        self._precreate_venv(tmp_path)
+
+        runner = CliRunner()
+        crafted = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="ModuleNotFoundError: No module named '--index-url=https://evil.example'",
+        )
+        with patch("subprocess.run", return_value=crafted) as mock_sub:
+            result = runner.invoke(
+                main,
+                ["run", "abc123def456", "--file", "api_client.py", "--json", "--auto-install"],
+            )
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip())
+        assert payload["status"] == "error"
+        assert "refusing to auto-install" in payload["error"]
+        # The crafted token must never appear in any subprocess invocation
+        for call in mock_sub.call_args_list:
+            assert "--index-url=https://evil.example" not in [str(a) for a in call.args[0]]
+
+    def test_run_json_stream_emits_events_and_result(self, multi_script_env):
+        tmp_path, _ = multi_script_env
+        self._precreate_venv(tmp_path)
+
+        runner = CliRunner()
+        completed = MagicMock(returncode=0, stdout="ok\n", stderr="")
+        with patch("subprocess.run", return_value=completed):
+            result = runner.invoke(
+                main,
+                ["run", "abc123def456", "--file", "api_client.py", "--json-stream"],
+            )
+
+        assert result.exit_code == 0, result.output
+        events = [json.loads(line) for line in result.stdout.strip().splitlines()]
+        assert [event["event"] for event in events[:3]] == [
+            "run_resolved",
+            "script_selected",
+            "process_started",
+        ]
+        assert events[-1]["event"] == "result"
+        assert events[-1]["status"] == "ok"
+        assert events[-1]["stdout"] == "ok\n"
+
+    def test_run_ls_json_lists_scripts_without_executing(self, multi_script_env):
+        runner = CliRunner()
+        with patch("subprocess.run") as mock_sub:
+            result = runner.invoke(main, ["run", "abc123def456", "--ls", "--json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip())
+        assert payload["status"] == "ok"
+        assert {s["name"] for s in payload["scripts"]} == {"api_client.py", "example_usage.py"}
+        mock_sub.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Agent --json: interruption + stdout-purity
+# ---------------------------------------------------------------------------
+
+
+class TestAgentJsonInterruption:
+    def test_keyboard_interrupt_emits_error_payload(self):
+        runner = CliRunner()
+        with patch("reverse_api.cli.run_agent_capture", side_effect=KeyboardInterrupt):
+            result = runner.invoke(agent, ["--json", "-p", "x"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "error"
+        assert payload["error"] == "interrupted"
+
+    def test_inner_keyboard_interrupt_does_not_silently_succeed(self):
+        """When run_agent_capture returns a dict with `error: "interrupted"` (the
+        scenario where KeyboardInterrupt is caught inside run_auto_capture rather
+        than propagating up), the agent payload must report status=error.
+
+        Regression for cubic-dev-ai PR #61 review (P1).
+        """
+        runner = CliRunner()
+        captured = {
+            "run_id": "abc12345",
+            "mode": "auto",
+            "script_path": None,
+            "usage": {},
+            "error": "interrupted",
+        }
+        with patch("reverse_api.cli.run_agent_capture", return_value=captured):
+            result = runner.invoke(agent, ["--json", "-p", "x"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "error"
+        assert payload["error"] == "interrupted"
+        assert payload["run_id"] == "abc12345"
+
+
+class TestAgentJsonStdoutPurity:
+    """Stdout should contain exactly one JSON line; Rich noise must go to stderr."""
+
+    def test_rich_console_output_does_not_contaminate_stdout(self):
+        from reverse_api.cli import console as cli_console
+
+        # Click 8.2+ separates stdout/stderr by default
+        runner = CliRunner()
+
+        def fake_capture(**kwargs):
+            cli_console.print("noisy human-readable status")
+            return {"run_id": "abc", "mode": "auto", "script_path": None, "usage": {}}
+
+        with patch("reverse_api.cli.run_agent_capture", side_effect=fake_capture):
+            result = runner.invoke(agent, ["--json", "-p", "x"])
+
+        assert result.exit_code == 0
+        # stdout is exactly one JSON object — nothing else
+        stdout = result.stdout.strip()
+        payload = json.loads(stdout)
+        assert payload["status"] == "ok"
+        assert "noisy" not in stdout
+        # The noise landed on stderr instead
+        assert "noisy" in result.stderr
+
+
+@pytest.mark.parametrize("output_flag", ["--json", "--json-stream", "--no-interactive"])
+def test_provider_failure_is_not_reported_as_success(tmp_path, output_flag):
+    """Exercise the real capture wrapper, where a failed SDK returns None."""
+    from unittest.mock import AsyncMock
+
+    from reverse_api.config import ConfigManager
+
+    config = ConfigManager(tmp_path / "config.json")
+    config.config.update({"sdk": "claude", "agent_provider": "chrome-mcp", "real_time_sync": False})
+    engine = MagicMock()
+    engine.analyze_and_generate = AsyncMock(return_value=None)
+    with (
+        patch("reverse_api.cli.config_manager", config),
+        patch("reverse_api.cli.session_manager", SessionManager(tmp_path / "history.json")),
+        patch("reverse_api.auto_engineer.ClaudeAutoEngineer", return_value=engine),
+    ):
+        result = CliRunner().invoke(main, ["agent", "-p", "test provider failure", "--headless", "-o", str(tmp_path), output_flag])
+    assert result.exit_code == 1, result.output
+    if output_flag != "--no-interactive":
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "error"
+        assert payload["error_kind"] == "engine_failure"
+        assert payload["script_path"] is None
+        assert payload["error"] == "Agent analysis produced no result."
+    else:
+        assert "error: Agent analysis produced no result." in result.stderr
+    engine.stop_sync.assert_called_once()
+
+
+@pytest.mark.parametrize("sdk", ["claude", "cursor"])
+@pytest.mark.parametrize("interrupt_type", [KeyboardInterrupt, asyncio.CancelledError])
+@pytest.mark.parametrize(
+    "output_flag,after_result",
+    [("--json", False), ("--json-stream", False), ("--no-interactive", False), (None, False), (None, True)],
+)
+def test_provider_interrupt_output_modes(tmp_path, monkeypatch, sdk, output_flag, after_result, interrupt_type):
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock
+
+    from reverse_api.config import ConfigManager
+
+    config = ConfigManager(tmp_path / "config.json")
+    config.config.update({"sdk": sdk, "agent_provider": "chrome-mcp", "real_time_sync": False})
+    monkeypatch.setenv("CURSOR_API_KEY", "test-only")
+    SessionManager(tmp_path / "history.json").add_run("older-run", "previous prompt")
+    with ExitStack() as stack:
+        stack.enter_context(patch("reverse_api.cli.config_manager", config))
+        stack.enter_context(patch("reverse_api.cli.session_manager", SessionManager(tmp_path / "history.json")))
+        if sdk == "claude":
+            client = stack.enter_context(patch("reverse_api.auto_engineer.ClaudeSDKClient"))
+            client.return_value.__aexit__ = AsyncMock(return_value=False)
+            if after_result:
+                client.return_value.__aenter__ = AsyncMock(return_value=client.return_value)
+                client.return_value.query = AsyncMock()
+                stack.enter_context(patch(
+                    "reverse_api.auto_engineer.ClaudeAutoEngineer._process_streaming_response",
+                    new=AsyncMock(return_value={"script_path": "partial.py", "usage": {}}),
+                ))
+                stack.enter_context(patch(
+                    "reverse_api.auto_engineer.ClaudeAutoEngineer._prompt_follow_up",
+                    new=AsyncMock(side_effect=interrupt_type),
+                ))
+            else:
+                client.return_value.__aenter__ = AsyncMock(side_effect=interrupt_type)
+        else:
+            stack.enter_context(patch("reverse_api.cursor_engineer._ensure_cursor_bridge_deps", return_value=None))
+            if after_result:
+                stack.enter_context(patch("reverse_api.cursor_engineer.CursorAutoEngineer._one_turn", new=AsyncMock(return_value={})))
+                stack.enter_context(patch(
+                    "reverse_api.cursor_engineer.CursorAutoEngineer._prompt_follow_up",
+                    new=AsyncMock(side_effect=interrupt_type),
+                ))
+            else:
+                stack.enter_context(patch("reverse_api.cursor_engineer.CursorAutoEngineer._one_turn", new=AsyncMock(side_effect=interrupt_type)))
+        args = ["agent", "-p", "test interruption", "--headless", "-o", str(tmp_path)]
+        if output_flag:
+            args.append(output_flag)
+        result = CliRunner().invoke(main, args)
+    if interrupt_type is asyncio.CancelledError:
+        assert result.exit_code == 1, result.output
+        if output_flag in ("--json", "--json-stream"):
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            assert payload["status"] == "error"
+            assert payload["error"] == "Agent analysis cancelled."
+        else:
+            assert "Agent analysis cancelled." in result.stderr
+    elif output_flag is None:
+        assert result.exit_code == 0, result.output
+        assert "run aborted" in result.output
+        assert "produced no result" not in result.output
+    else:
+        assert result.exit_code == 1, result.output
+        if output_flag == "--no-interactive":
+            assert "error: interrupted" in result.stderr
+        else:
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            assert payload["status"] == "error"
+            assert payload["error_kind"] == "interrupted"
+            assert payload["error"] == "interrupted"
+
+    if interrupt_type is KeyboardInterrupt:
+        assert result.output.count("run aborted") == 1
+
+    if after_result:
+        history = json.loads((tmp_path / "history.json").read_text())
+        assert history[0]["paths"]["script_path"]
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("error_type", [Exception, TimeoutError])
+@pytest.mark.parametrize("output_flag", [None, "--json", "--json-stream", "--no-interactive"])
+def test_empty_provider_exception_is_failure(tmp_path, monkeypatch, error_type, output_flag, debug):
+    monkeypatch.setenv("RAE_DEBUG", "1" if debug else "0")
+    from reverse_api.config import ConfigManager
+
+    config = ConfigManager(tmp_path / "config.json")
+    config.config.update({"sdk": "claude", "agent_provider": "chrome-mcp", "real_time_sync": False})
+    engine = MagicMock()
+    engine.start_sync.side_effect = error_type()
+    with (
+        patch("reverse_api.cli.config_manager", config),
+        patch("reverse_api.cli.session_manager", SessionManager(tmp_path / "history.json")),
+        patch("reverse_api.auto_engineer.ClaudeAutoEngineer", return_value=engine),
+    ):
+        args = ["agent", "-p", "test empty failure", "--headless", "-o", str(tmp_path)]
+        if output_flag:
+            args.append(output_flag)
+        result = CliRunner().invoke(main, args)
+    assert result.exit_code == 1, result.output
+    if output_flag in ("--json", "--json-stream"):
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "error"
+        assert payload["error"] == error_type.__name__
+    else:
+        assert result.stderr.count(f"error: {error_type.__name__}") == 1
+    assert ("Traceback (most recent call last):" in result.stderr) is debug
+    assert "Traceback" not in result.stdout
+    if debug:
+        assert "run_auto_capture" in result.stderr
+
+
+@pytest.mark.parametrize("output_flag", ["--json", "--json-stream", "--no-interactive"])
+def test_direct_interrupt_after_claude_result_keeps_partial_run(tmp_path, output_flag):
+    from unittest.mock import AsyncMock
+
+    from reverse_api.config import ConfigManager
+
+    config = ConfigManager(tmp_path / "config.json")
+    config.config.update({"sdk": "claude", "agent_provider": "chrome-mcp", "real_time_sync": False})
+    with (
+        patch("reverse_api.cli.config_manager", config),
+        patch("reverse_api.cli.session_manager", SessionManager(tmp_path / "history.json")),
+        patch("reverse_api.auto_engineer.ClaudeSDKClient") as client,
+        patch("reverse_api.auto_engineer.ClaudeAutoEngineer._process_streaming_response",
+              new=AsyncMock(return_value={"script_path": "completed.py", "usage": {"input_tokens": 7}})),
+    ):
+        client.return_value.__aenter__ = AsyncMock(return_value=client.return_value)
+        client.return_value.query = AsyncMock()
+        client.return_value.__aexit__ = AsyncMock(side_effect=KeyboardInterrupt)
+        result = CliRunner().invoke(main, ["agent", "-p", "direct interruption", "--headless", "-o", str(tmp_path), output_flag])
+    assert result.exit_code == 1, result.output
+    assert result.output.count("run aborted") == 1
+    history = json.loads((tmp_path / "history.json").read_text())
+    assert history[0]["paths"]["script_path"] == "completed.py"
+    assert history[0]["usage"]["input_tokens"] == 7
+    if output_flag in ("--json", "--json-stream"):
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["error"] == "interrupted"
+        assert payload["script_path"] == "completed.py"
+
+
+@pytest.mark.parametrize(
+    "sdk,engine_path",
+    [
+        ("claude", "reverse_api.auto_engineer.ClaudeAutoEngineer"),
+        ("opencode", "reverse_api.auto_engineer.OpenCodeAutoEngineer"),
+        ("copilot", "reverse_api.auto_engineer.CopilotAutoEngineer"),
+        ("cursor", "reverse_api.cursor_engineer.CursorAutoEngineer"),
+        ("codex", "reverse_api.codex_engineer.CodexAutoEngineer"),
+    ],
+)
+def test_agent_url_reaches_engine(tmp_path, sdk, engine_path):
+    from unittest.mock import AsyncMock
+
+    from reverse_api.config import ConfigManager
+
+    config = ConfigManager(tmp_path / "config.json")
+    config.config.update({"sdk": sdk, "agent_provider": "auto", "real_time_sync": False})
+    engine = MagicMock()
+    engine.analyze_and_generate = AsyncMock(return_value=None)
+    with (
+        patch("reverse_api.cli.config_manager", config),
+        patch("reverse_api.cli.session_manager", SessionManager(tmp_path / "history.json")),
+        patch(engine_path, return_value=engine) as engine_cls,
+    ):
+        CliRunner().invoke(
+            main,
+            ["agent", "-p", "fetch job postings", "-u", "https://jobs.ashbyhq.com/openai", "--headless", "-o", str(tmp_path), "--json"],
+        )
+    assert engine_cls.call_args.kwargs["start_url"] == "https://jobs.ashbyhq.com/openai"
+
+
+@pytest.mark.parametrize("saved_model", ["gpt-6-astra", None])
+def test_agent_hands_codex_its_model_effort_and_home(tmp_path, saved_model):
+    from unittest.mock import AsyncMock
+
+    from reverse_api.config import ConfigManager
+
+    config = ConfigManager(tmp_path / "config.json")
+    config.config.update({"sdk": "codex", "agent_provider": "auto", "real_time_sync": False})
+    config.config.update({"codex_model": saved_model, "codex_effort": "low", "codex_home": "~/.codex"})
+    engine = MagicMock()
+    engine.analyze_and_generate = AsyncMock(return_value=None)
+    history = SessionManager(tmp_path / "history.json")
+    with (
+        patch("reverse_api.cli.config_manager", config),
+        patch("reverse_api.cli.session_manager", history),
+        patch("reverse_api.codex_engineer.CodexAutoEngineer", return_value=engine) as engine_cls,
+    ):
+        CliRunner().invoke(main, ["agent", "-p", "fetch job postings", "-o", str(tmp_path), "--json"])
+    kwargs = engine_cls.call_args.kwargs
+    assert (kwargs["codex_model"], kwargs["codex_effort"], kwargs["codex_home"], kwargs["sdk"]) == (saved_model, "low", "~/.codex", "codex")
+    assert history.get_history(1)[0]["sdk"] == "codex", "the run records its SDK"
+
+
+def test_agent_model_flag_picks_a_codex_model_for_the_run(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from reverse_api.config import ConfigManager
+
+    config = ConfigManager(tmp_path / "config.json")
+    config.config.update({"sdk": "codex", "agent_provider": "auto", "real_time_sync": False, "codex_model": "gpt-6-astra"})
+    engine = MagicMock()
+    engine.analyze_and_generate = AsyncMock(return_value=None)
+    with (
+        patch("reverse_api.cli.config_manager", config),
+        patch("reverse_api.cli.session_manager", SessionManager(tmp_path / "history.json")),
+        patch("reverse_api.codex_engineer.CodexAutoEngineer", return_value=engine) as engine_cls,
+    ):
+        done = CliRunner().invoke(main, ["agent", "-p", "fetch job postings", "-m", "gpt-6.1-sol", "-o", str(tmp_path), "--json"])
+    assert "Invalid value" not in done.output
+    assert engine_cls.call_args.kwargs["codex_model"] == "gpt-6.1-sol"
+
+
+def test_agent_bare_host_url_gets_https_scheme(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from reverse_api.config import ConfigManager
+
+    config = ConfigManager(tmp_path / "config.json")
+    config.config.update({"sdk": "claude", "agent_provider": "auto", "real_time_sync": False})
+    engine = MagicMock()
+    engine.analyze_and_generate = AsyncMock(return_value=None)
+    with (
+        patch("reverse_api.cli.config_manager", config),
+        patch("reverse_api.cli.session_manager", SessionManager(tmp_path / "history.json")),
+        patch("reverse_api.auto_engineer.ClaudeAutoEngineer", return_value=engine) as engine_cls,
+    ):
+        result = CliRunner().invoke(
+            main,
+            ["agent", "-p", "fetch job postings", "-u", "jobs.ashbyhq.com/openai", "--headless", "-o", str(tmp_path), "--json"],
+        )
+    assert engine_cls.call_args.kwargs["start_url"] == "https://jobs.ashbyhq.com/openai"
+    assert json.loads(result.stdout.strip().splitlines()[-1])["url"] == "https://jobs.ashbyhq.com/openai"

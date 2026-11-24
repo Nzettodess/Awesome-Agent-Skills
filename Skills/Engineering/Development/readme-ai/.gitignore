@@ -1,0 +1,54 @@
+# Build Artifacts
+*.egg-info/
+build/
+dist/
+
+# Compiled Python Files
+*.pyc
+*.pyo
+__pycache__/
+
+# Documentation and MkDocs
+.cache
+site
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+notebooks/
+
+# Logging
+*.log
+logs/
+
+# Python Tools
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# System-Specific Files
+.DS_Store
+
+# Temporary Files
+*~
+
+# Testing
+.nox/
+.reports/
+*coverage*
+
+# Virtual Environment
+.env
+.venv/
+
+# VSCode Workspace Settings
+.vscode/
+
+# ReadmeAI
+CLAUDE.md
+.claude/
+.cursor/
+.readmeai/
+.actrc
+.version.tmp
+.github/workflows/update-badges-local.yml
+.github/workflows/update-badges.yml

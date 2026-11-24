@@ -1,0 +1,82 @@
+---
+title: Installation
+description: Install Reverse API Engineer with uv or pip; add the [manual] extra for manual-mode capture.
+---
+
+<Callout type="info" title="What you'll need">
+- **Python 3.11+**
+- SDK credentials for your selected backend. For the default Claude SDK, set
+  **`ANTHROPIC_API_KEY`**.
+- **Node.js + npx** for agent mode tooling (browser MCP stacks on `auto` / `chrome-mcp`, plus **`npx` bootstrapping** for **`agent-browser`**). `chrome-mcp` targets Node.js 20.19+.
+- A few minutes
+</Callout>
+
+## Install the CLI
+
+`uv` is recommended for faster installs and proper tool isolation. Pick one.
+
+<Tabs items={['uv (recommended)', 'pip']}>
+  <Tab value="uv (recommended)">
+    ```bash
+    uv tool install reverse-api-engineer
+    ```
+  </Tab>
+  <Tab value="pip">
+    ```bash
+    pip install reverse-api-engineer
+    ```
+  </Tab>
+</Tabs>
+
+## Manual mode: install the browser stack
+
+Agent mode (the default) drives capture through `npx`-launched browser tooling —
+browser MCP servers (Playwright or Chrome DevTools) or the Vercel `agent-browser`
+CLI — and needs no extra Python packages. **Manual mode** drives a local
+Playwright browser, which ships in the optional `[manual]` extra. Install the
+extra, then download the Chromium build:
+
+<Tabs items={['uv (recommended)', 'pip']}>
+  <Tab value="uv (recommended)">
+    ```bash
+    uv tool install "reverse-api-engineer[manual]"
+    playwright install chromium
+    ```
+  </Tab>
+  <Tab value="pip">
+    ```bash
+    pip install "reverse-api-engineer[manual]"
+    playwright install chromium
+    ```
+  </Tab>
+</Tabs>
+
+## Verify the install
+
+```bash
+reverse-api-engineer --version
+```
+
+You should see a version string. If not, ensure your shell's `PATH` includes
+`~/.local/bin` (for `uv tool`) or wherever `pip` puts user scripts.
+
+## Where does it store data?
+
+```text
+~/.reverse-api/
+├── config.json              # your settings
+└── runs/
+    └── scripts/{run_id}/    # generated clients (canonical)
+```
+
+Plus a local copy in `./scripts/{descriptive_name}/` inside the directory
+where you launched the CLI, so the output lands inside the project you're
+working on.
+
+## Next
+
+<Cards>
+  <Card title="Quick start" href="/docs/quick-start" description="From `pip install` to a working client." />
+  <Card title="Configure your model" href="/docs/configuration/models" description="Choose the model for your selected SDK." />
+  <Card title="Use it from your coding agent" href="/docs/cli/coding-agents" description="Install the agent skill for Claude Code, Codex, Cursor and more." />
+</Cards>
